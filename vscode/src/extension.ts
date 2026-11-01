@@ -19,7 +19,8 @@ import {
   readPullRequest,
   SourceError,
 } from "./sources.ts";
-import { Worktrees } from "./worktree.ts";
+import { resolveGit, Worktrees } from "./worktree.ts";
+import { activateAutomation, type AutomationLifecycle } from "./automation-host.ts";
 
 class OperatorError extends Error {}
 interface Host {
@@ -100,6 +101,7 @@ export function activate(context: vscode.ExtensionContext): void {
   let busy = false;
   let disposed = false;
   let openingFolder = false;
+  let automation: AutomationLifecycle | undefined;
   const changed = new vscode.EventEmitter<void>();
   const abort = new AbortController();
   const exportersAtStartup = exporterFindings();
@@ -107,7 +109,9 @@ export function activate(context: vscode.ExtensionContext): void {
     dispose() {
       disposed = true;
       abort.abort();
-      current?.runtime.dispose();
+      const runtime = current?.runtime;
+      if (automation?.active) void automation.shutdown().finally(() => runtime?.dispose()).catch(() => {});
+      else runtime?.dispose();
     },
   });
 
@@ -170,11 +174,8 @@ export function activate(context: vscode.ExtensionContext): void {
           ? extension.exports
           : await extension.activate();
         guard();
-        const probe = new Worktrees(
-          api.getAPI(1).git.path,
-          root,
-          context.globalStorageUri.fsPath,
-        );
+        const git = resolveGit(api.getAPI(1).git.path);
+        const probe = new Worktrees(git, root, context.globalStorageUri.fsPath);
         const common = await probe.commonDirectory();
         if (guard() !== root)
           throw new OperatorError("Workspace changed during initialization.");
@@ -189,11 +190,7 @@ export function activate(context: vscode.ExtensionContext): void {
           runtime,
           root,
           identity,
-          trees: new Worktrees(
-            api.getAPI(1).git.path,
-            root,
-            join(storage, "worktrees"),
-          ),
+          trees: new Worktrees(git, root, join(storage, "worktrees")),
         };
         return current;
       })().finally(() => {
@@ -366,6 +363,10 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       const directory = await h.trees.prepare(ticket.id, abort.signal);
       guard();
+      if (automation?.active) {
+        await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(directory), { forceNewWindow: true });
+        return;
+      }
       // The new window host takes the same common-repository lock after this one releases it.
       openingFolder = true;
       h.runtime.dispose();
@@ -687,6 +688,9 @@ export function activate(context: vscode.ExtensionContext): void {
             source: item.source,
             id: item.id,
             actor: item.actor,
+            context: item.context,
+            url: item.url,
+            thread: item.thread,
           });
         else if (action === "Approve follow-up to a ticket") {
           const ticket = await choose(h.runtime, (ticket) => !ticket.ended);
@@ -709,6 +713,9 @@ export function activate(context: vscode.ExtensionContext): void {
             source: item.source,
             id: item.id,
             actor: item.actor,
+            context: item.context,
+            url: item.url,
+            thread: item.thread,
           });
         }
         await context.globalState.update(receipt, true);
@@ -940,4 +947,5 @@ export function activate(context: vscode.ExtensionContext): void {
       },
     }),
   );
+  automation = activateAutomation(context, { host, guard, github, changed: () => changed.fire() });
 }

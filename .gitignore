@@ -3,3 +3,6 @@ lib/
 .artifacts/
 .env
 coverage/
+vscode/dist/
+
+.context/compound-engineering/

@@ -1,4 +1,12 @@
-# dsh-superagent
+# Superagent for VS Code and GitHub Copilot
+
+The native VS Code adaptation lives in [vscode/](vscode/README.md). It reuses the original ticket engine with persistent Copilot workers, isolated Git worktrees, continuous GitHub / **Microsoft Teams** intake, policy routing and original-conversation replies. Supervision exposes source context, decisions, transcripts and versioned policy/prompts. Native setup controls execution and sending; the extension uses the official Copilot SDK without a DSH runtime or HTTP listener.
+
+Build and install the local extension using [the VS Code guide](vscode/README.md). Read [the security boundaries and deployment requirements](vscode/SECURITY.md) before enterprise rollout. Local validation does not establish tenant approval or production qualification.
+
+The material below describes the original research prototype. Its DSH setup, permissions and Feishu integration are legacy reference material and are not used by the VS Code extension.
+
+# Original dsh-superagent prototype
 
 > **Research prototype for reference only, not an official DeepSeek product.** This code grew out of our team's day-to-day development work, with much of the engineering done by coding agents. Treat it as research code, not production-ready software. It may still contain bugs, and its coding style and engineering practices may be inconsistent. Review and adapt it before using it in your own environment.
 >
