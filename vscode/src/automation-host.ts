@@ -241,26 +241,38 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
     return thread
   }
 
+  function getBackend(): CopilotBackend {
+    assertCurrent()
+    const h = owner!
+    return backend ??= new CopilotBackend({ cliPath: config().get<string>('copilot.cliPath', 'copilot'), onPermissionRequest: async (request, invocation) => {
+      assertCurrent()
+      const ticket = h.runtime.get(invocation.ticketId)
+      if (ticket.ended || h.runtime.paused) return { kind: 'reject', feedback: 'The ticket is stopped or paused.' }
+      if (ticketPermission(request, invocation.directory, config().get<string>('execution.permissionMode', 'ask') === 'ticket') === 'allow') return { kind: 'approve-once' }
+      const answer = await vscode.window.showWarningMessage(`Allow ${request.kind} for ${ticket.title}?`,
+        { modal: true, detail: JSON.stringify(request, null, 2).slice(0, 18000) }, 'Allow once')
+      assertCurrent()
+      if (h.runtime.get(ticket.id).ended || h.runtime.paused) return { kind: 'reject', feedback: 'Authorization was withdrawn.' }
+      return answer === 'Allow once' ? { kind: 'approve-once', approvedInteractively: true } : { kind: 'reject', feedback: 'Declined by the operator.' }
+    } })
+  }
+
   async function get(): Promise<AutomationService> {
     assertCurrent()
     if (service) return service
     if (initializing) return initializing
     initializing = (async () => {
       const h = owner = await hooks.host()
-      backend = new CopilotBackend({ cliPath: config().get<string>('copilot.cliPath', 'copilot'), onPermissionRequest: async (request, invocation) => {
-        assertCurrent()
-        const ticket = h.runtime.get(invocation.ticketId)
-        if (ticket.ended || h.runtime.paused) return { kind: 'reject', feedback: 'The ticket is stopped or paused.' }
-        if (ticketPermission(request, invocation.directory, config().get<string>('execution.permissionMode', 'ask') === 'ticket') === 'allow') return { kind: 'approve-once' }
-        const answer = await vscode.window.showWarningMessage(`Allow ${request.kind} for ${ticket.title}?`,
-          { modal: true, detail: JSON.stringify(request, null, 2).slice(0, 18000) }, 'Allow once')
-        assertCurrent()
-        if (h.runtime.get(ticket.id).ended || h.runtime.paused) return { kind: 'reject', feedback: 'Authorization was withdrawn.' }
-        return answer === 'Allow once' ? { kind: 'approve-once', approvedInteractively: true } : { kind: 'reject', feedback: 'Declined by the operator.' }
-      } })
       const prompt = await readFile(vscode.Uri.joinPath(context.extensionUri, 'dist', 'prompts', 'worker.md').fsPath, 'utf8').catch(() => '')
       const promptParts: Record<string, string> = JSON.parse(await readFile(vscode.Uri.joinPath(context.extensionUri, 'dist', 'prompts', 'defaults.json').fsPath, 'utf8').catch(() => '{}'))
-      service = new AutomationService(h.runtime, { backend, sourceNamespaces: () => { const p = sourcePolicy(); return { github: p.github.namespaces, teams: p.teams.namespaces } }, prepare: ticket => h.trees.prepare(ticket.id), poll, send, changed: notify,
+      service = new AutomationService(h.runtime, { backend: {
+        run: input => getBackend().run(input),
+        assess: (...args) => getBackend().assess(...args),
+        steer: input => getBackend().steer(input),
+        handoff: ticketId => backend?.handoff(ticketId),
+        abort: async ticketId => { await backend?.abort(ticketId) },
+        dispose: async () => { await backend?.dispose() },
+      }, sourceNamespaces: () => { const p = sourcePolicy(); return { github: p.github.namespaces, teams: p.teams.namespaces } }, prepare: ticket => h.trees.prepare(ticket.id), poll, send, changed: notify,
         systemPrompt: prompt, promptParts, claimPullRequest,
         resolveThread: async (family, id, signal) => {
           if (family !== 'github' || !/^[1-9]\d*$/.test(id)) throw new Error('Use a complete scoped Teams thread identity')
@@ -296,7 +308,7 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
     await config().update('delivery.enabled', writes === 'Enable replies', vscode.ConfigurationTarget.Global)
     if (sourcePolicy().teams.enabled) await teams(writes === 'Enable replies', true)
     const s = await get()
-    const health = await backend!.check()
+    const health = await getBackend().check()
     if (!health.authenticated) throw new Error('Sign in to the configured Copilot CLI before starting Superagent')
     s.saveSettings({ ...s.settings.value, enabled: true, sources: sourcePolicy() }, s.settings.revision)
     await config().update('service.enabled', true, vscode.ConfigurationTarget.Global)
@@ -356,7 +368,7 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
   register('dashboard', async () => { await get(); panel.show() })
   register('startService', start)
   register('stopService', () => action({ action: 'stopService' }))
-  register('checkService', async () => { await get(); const status = await backend!.check(); await vscode.window.showInformationMessage(`Copilot ${status.cliVersion}: ${status.authenticated ? 'signed in' : 'sign-in required'}. No model request was sent.`) })
+  register('checkService', async () => { await get(); const status = await getBackend().check(); await vscode.window.showInformationMessage(`Copilot ${status.cliVersion}: ${status.authenticated ? 'signed in' : 'sign-in required'}. No model request was sent.`) })
   register('syncTeamsMembers', () => syncMembers(true))
 
   if (vscode.chat?.createChatParticipant) {

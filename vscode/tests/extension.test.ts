@@ -22,7 +22,7 @@ const code = buildSync({
 }).outputFiles[0]!.text;
 
 function fixture() {
-  const temporary = realpathSync(mkdtempSync(join(tmpdir(), "superagent-extension-")));
+  const temporary = realpathSync.native(mkdtempSync(join(tmpdir(), "superagent-extension-")));
   const root = join(temporary, "repo");
   mkdirSync(root);
   const git = (...args: string[]) =>
@@ -60,6 +60,7 @@ function fixture() {
   let approve = true;
   let onConfirm: (() => void) | undefined, onSignIn: (() => void) | undefined;
   let response: unknown = { value: [] };
+  let processStarts = 0;
   const api: any = {
     workspace: {
       isTrusted: true,
@@ -190,7 +191,18 @@ function fixture() {
   runInNewContext(code, {
     module,
     exports: module.exports,
-    require: (name: string) => (name === "vscode" ? api : requireModule(name)),
+    require: (name: string) => {
+      if (name === "vscode") return api;
+      const loaded = requireModule(name);
+      if (name === "node:child_process") return {
+        ...loaded,
+        spawn: (...args: unknown[]) => {
+          processStarts++;
+          return loaded.spawn(...args);
+        },
+      };
+      return loaded;
+    },
     process: sandboxProcess,
     Buffer,
     structuredClone,
@@ -252,6 +264,9 @@ function fixture() {
     },
     get gitActivations() {
       return gitActivations;
+    },
+    get processStarts() {
+      return processStarts;
     },
     reload() {
       deactivate();
@@ -836,6 +851,7 @@ test("GitHub source changes during SecretStorage retrieval and credential remova
 test('model routing requires exact native consent and cancelled consent cannot grant a mandate', async () => {
   const f = fixture();
   try {
+    f.values['superagent.copilot.cliPath'] = 'superagent-test-missing-copilot';
     f.approve(false);
     const before = f.promptCount;
     await f.invoke('superagent_route', { request: 'Run the quoted request' });
@@ -850,5 +866,12 @@ test('model routing requires exact native consent and cancelled consent cannot g
     f.onConfirm(() => {});
     const created = await f.invoke('superagent_route', { request: 'Repair only file A' });
     assert.ok(JSON.parse(created.content[0]!.value).ticketId);
+    const snapshot = JSON.parse((await f.invoke('superagent_route', { status: true })).content[0]!.value);
+    assert.equal(snapshot.tickets.length, 1);
+    assert.equal(snapshot.health.running, false);
+    await f.command('stopService');
+    assert.equal(f.errors.length, 0);
   } finally { f.close(); }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.processStarts, 0);
 });

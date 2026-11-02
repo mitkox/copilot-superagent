@@ -58,7 +58,7 @@ class FakeClient implements CopilotClientConnection {
 }
 
 function fixture(t: TestContext, options: Partial<CopilotBackendOptions> = {}) {
-  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'superagent-copilot-test-')))
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), 'superagent-copilot-test-')))
   const client = new FakeClient()
   let clientOptions: CopilotClientOptions | undefined
   const backend = new CopilotBackend({
