@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
+import { fixtureTransport } from './fixture-transport.mjs';
 import { pathToFileURL as fixtureURL } from 'node:url';
 const { CopilotBackend } = await import(fixtureURL(process.env.SUPERAGENT_TEST_BACKEND).href);
 const fixtureDirectory = dirname(fileURLToPath(import.meta.url));
@@ -25,7 +26,7 @@ const bounded = async (work, label, ms = 8000) => {
 async function exercise(wireApi) {
     const directory = await mkdtemp(join(tmpdir(), `copilot-offline-${wireApi}-`));
     const workspace = join(directory, 'empty');
-    await Promise.all(['empty', 'data', 'config'].map(name => mkdir(join(directory, name))));
+    await Promise.all(['empty', 'data'].map(name => mkdir(join(directory, name))));
     const sessionId = `fixture-${randomUUID()}`;
     const events = [], sent = [], received = [], children = new Set();
     let revision = 0, toolCalls = 0, steerId;
@@ -63,12 +64,12 @@ async function exercise(wireApi) {
     let runSettled = false, childRunning = false, rootIdleWithChild = 0;
     const applied = [];
     const safe = config => ({ ...config,
+        model: 'fixture-model', providers: undefined, models: undefined,
         provider: { type: 'openai', wireApi, baseUrl: `${origin}/v1`, apiKey: 'dummy-local-fixture-key' },
         availableTools: config.tools.map(tool => `custom:${tool.name}`), excludedTools: ['builtin:*', 'mcp:*'],
-        configDirectory: join(directory, 'config'),
         enableConfigDiscovery: false, enableFileHooks: false, enableHostGitOperations: false, enableSkills: false, skipCustomInstructions: true,
         enableOnDemandInstructionDiscovery: false, skipEmbeddingRetrieval: true, embeddingCacheStorage: 'in-memory', enableSessionStore: false, enableSessionTelemetry: false,
-        mcpServers: {}, pluginDirectories: [], additionalDirectories: [], infiniteSessions: { enabled: false }, streaming: false,
+        mcpServers: {}, pluginDirectories: [], additionalDirectories: [], streaming: false,
         customAgents: [{ name: 'fixture-agent', description: 'Harmless no-tool child', prompt: 'Reply with fixture done', tools: [], mcpServers: {}, model: 'fixture-model', modelPolicy: 'required' }],
         onEvent: event => { if (event.type === 'subagent.completed')
             childRunning = false; if (event.type === 'assistant.idle' && !event.agentId && childRunning) {
@@ -80,8 +81,7 @@ async function exercise(wireApi) {
         onPermissionRequest: () => ({ kind: 'approve-once' }),
         clientFactory: options => {
             const handler = options.requestHandler;
-            const send = handler.sendRequest.bind(handler);
-            handler.sendRequest = (request, context) => { assert.equal(new URL(request.url).origin, origin); return send(request, context); };
+            fixtureTransport(handler, origin);
             realClient = new CopilotClient({ ...options,
                 connection: RuntimeConnection.forStdio({ path: process.env.SUPERAGENT_TEST_LAUNCHER, args: [cliPath] }),
                 mode: 'empty', baseDirectory: join(directory, 'data'), workingDirectory: workspace, useLoggedInUser: false,

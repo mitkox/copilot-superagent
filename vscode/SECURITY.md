@@ -2,6 +2,8 @@
 
 Superagent uses the shared ticket engine and the official Copilot SDK through an installed Copilot CLI over stdio. It polls configured GitHub/Teams sources, launches authorized coding sessions and sends replies when explicitly enabled. It has no extension telemetry exporter, HTTP listener or automatic updater. Copilot inference and provider operational logging remain governed by their services and organization policies.
 
+Copilot inference is restricted to the reviewed CLI and GitHub-owned Business/Enterprise endpoints (or one pinned GHE.com data-residency host). Custom provider configuration, inherited model credentials, personal-plan endpoints and redirects are rejected. See [Copilot-only enforcement](docs/copilot-only.md) for the exact boundary and deployment requirements.
+
 ## Authorization and execution
 
 Workspace Trust, one file-backed repository, privacy checks and application-scoped source configuration are required. Provider/model text cannot change settings or credentials. Continuous execution and source sending start after native operator setup. Local model-tool dispatch additionally requires native confirmation of the exact request and target ticket. Every inference request and native tool hook rechecks current authority against the configured provider namespace. Allowed explicit requests grant immutable bounded mandates; proactive work additionally requires an enabled acceptance mode and matching rules. Bots/CI provide context, never explicit authority.

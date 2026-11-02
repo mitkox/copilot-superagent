@@ -13,7 +13,7 @@ export function ticketPermission(request: PermissionRequest, directory: string, 
   switch (request.kind) {
     case 'read': return request.path && within(request.path) ? 'allow' : 'ask'
     case 'write': return within(request.fileName) ? 'allow' : 'ask'
-    // As in DSH, shell access runs as the operator and is not a filesystem sandbox.
+    // Shell access runs as the operator and is not a filesystem sandbox.
     // The service's explicit native grant covers commands within the ticket mandate.
     case 'shell': return request.possiblePaths.every(within) ? 'allow' : 'ask'
     case 'custom-tool': return request.toolName.startsWith('orchestrator_') || request.toolName.startsWith('superagent_') ? 'allow' : 'ask'

@@ -1,8 +1,7 @@
 # Copilot and Teams parity validation
 
 Baseline: `deepseek-ai/dsh-superagent-prototype` commit
-`6337fc823ce20251c8de8085948165c81aaa701e`. The shared domain engine and original
-prompt sources remain unchanged. This extension adapts the execution, identity,
+`6337fc823ce20251c8de8085948165c81aaa701e`. The shared domain engine and adapted prompt sources retain their upstream MIT attribution. The legacy runtime and its dependencies have been removed. This extension adapts the execution, identity,
 consent and conversation boundaries to Copilot SDK 1.0.28 / CLI 1.0.105 and
 Microsoft Graph delegated Teams access.
 
@@ -20,7 +19,7 @@ model-routing authorization gate. Numbers below preserve that review's IDs.
 | 5 | Router can read paginated existing work and attach an explicitly referenced trigger to an authorized existing or completed ticket. Stopped/revoked tickets remain protected. | `orchestration.test.ts`: cross-conversation attachment, stopped-ticket rejection, status and notes. |
 | 6 | Pending tools and every actual inference request revalidate the mandate against live exact provider namespaces. | `orchestration.test.ts`: namespace removal; `model-requests.test.ts`: revoked owners and unknown child rejection. |
 | 7 | Transcript byte budgets protect control writes; authoritative records use immutable checksummed chunks beyond the old 16-MiB ceiling. | `runtime.test.ts`: escaped/multibyte transcripts, stop, >16-MiB reopen, receipt retention, corrupt archive preservation and partial-write recovery. |
-| 8 | Production prompt assembly includes runtime/execution migration and packaged skills; inaccessible DSH identity/loader instructions are replaced at build time. | `orchestration.test.ts`: assembled execution prompt; package inspection. |
+| 8 | Production prompt assembly packages Copilot execution instructions and adapted GitHub/Teams skills without legacy Harness commands. | `orchestration.test.ts`: assembled execution prompt; package inspection. |
 | 9 | `orchestrator_report` accepts documented `pr_number: null`. | `orchestration.test.ts`: actual tool schema and no-PR invocation. |
 | 10 | Same-conversation outbox delivery preserves enqueue order while independent conversations remain runnable. | `orchestration.test.ts`: blocked acknowledgement holds later result. |
 | 11 | A draft submits the revision at which editing began; newer snapshots cannot silently overwrite another policy revision. | `panel.test.ts`: execute real panel script with a newer snapshot. |
@@ -72,14 +71,8 @@ npm exec --yes --package=@github/copilot@1.0.105 -- npm run test:offline
 xvfb-run -a npm exec --yes --package=@github/copilot@1.0.105 -- npm run test:editor
 ```
 
-The offline suite uses the production backend with the real pinned SDK/CLI,
-empty fixture worktrees, dummy credentials and scripted loopback model responses.
-A Linux seccomp launcher denies native network syscalls; forwarding rejects any
-origin except that fixture's local server. It does not consume hosted inference
-or send GitHub/Teams messages. HTTP fixtures cover root/child instruction updates,
-steering, completion wakeup and resume. WebSocket fixtures assert authentication
-headers and bounded abort. Separate shell fixtures exercise handoff followed by
-both abort and disposal. Unit tests retain malformed-input and policy negatives.
+The offline suite uses the real pinned SDK/CLI with empty fixture worktrees and dummy credentials. A Linux seccomp launcher denies native networking. Production-negative fixtures keep the unmodified model handler and assert that custom HTTP/WebSocket providers receive no inference connections on create or resume. Positive lifecycle fixtures explicitly replace only the model transport in test code with a loopback-only forwarder, retaining production instruction and authority rewriting. These positive fixtures establish steering, root/child instruction updates, completion wakeup, resume, authentication-header forwarding, bounded abort and shell handoff behavior; they do not establish production endpoint acceptance. No hosted inference or GitHub/Teams sending is used.
+
 CI runs package checks on Linux, macOS and Windows, with separate Linux CLI and
 native-editor jobs.
 

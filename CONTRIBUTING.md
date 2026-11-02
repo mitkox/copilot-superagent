@@ -26,19 +26,20 @@ Tests use local fixtures and do not require Copilot or Teams credentials. To try
 | `vscode/src/`, `vscode/tests/` | VS Code host, Copilot workers, GitHub/Teams adapters, supervision, and tests |
 | `src/core/` | Shared ticket engine, policy, and reply rules |
 | `prompts/`, `skills/` | Original instructions adapted and bundled by the extension build |
-| `src/app/`, `src/client/`, `src/sources/`, `src/executor/` | Original DSH application, web panel, adapters, and executor |
-| `tests/`, numbered `docs/` guides, `SETUP.md` | Original prototype tests, design reference, and setup |
+| `tests/core-engine.spec.ts` | Shared ticket-engine behavioral tests, run by the extension checks |
+| `docs/`, `vscode/docs/` | Current documentation and validation evidence |
 
-The root `package.json` is the legacy DSH bundle; `vscode/package.json` is the extension. Keep the extension's existing ID and qualified agent tool references consistent when changing package metadata.
+The root `package.json` has no dependencies and forwards development commands to `vscode/package.json`. Install the extension dependencies from the root with `npm run install:extension`, or run `npm ci --ignore-scripts` from `vscode/`. Keep the extension's existing ID and qualified agent tool references consistent when changing package metadata.
 
-For shared engine or legacy runtime changes, also use the Node.js and pnpm versions declared in the root `package.json`, then run from the repository root:
+After dependency installation, the following root commands also validate shared engine changes:
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm check
+npm run check
+npm run audit:production
+npm run package
 ```
 
-The extension checks include shared core tests. They do not replace the full root checks for changes to the DSH application.
+The retired DeepSeek Harness runtime, root pnpm dependencies, Feishu integration, and web panel are not part of the supported build. Preserve the MIT notice for the retained shared engine and adapted instructions.
 
 ## Submit a change
 

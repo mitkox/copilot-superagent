@@ -1,9 +1,9 @@
 name: VS Code extension
 on:
   pull_request:
-    paths: ['vscode/**', 'src/core/**', 'prompts/**', 'skills/**', 'tests/core-engine.spec.ts', '.github/workflows/vscode.yml']
+    paths: ['package.json', 'package-lock.json', 'LICENSE', 'vscode/**', 'src/core/**', 'prompts/**', 'skills/**', 'tests/core-engine.spec.ts', '.github/workflows/vscode.yml']
   push:
-    paths: ['vscode/**', 'src/core/**', 'prompts/**', 'skills/**', 'tests/core-engine.spec.ts', '.github/workflows/vscode.yml']
+    paths: ['package.json', 'package-lock.json', 'LICENSE', 'vscode/**', 'src/core/**', 'prompts/**', 'skills/**', 'tests/core-engine.spec.ts', '.github/workflows/vscode.yml']
 permissions:
   contents: read
 concurrency:

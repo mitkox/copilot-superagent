@@ -2,7 +2,7 @@
 
 Source, issues, and contributions: [mitkox/copilot-superagent](https://github.com/mitkox/copilot-superagent). See [Contributing](https://github.com/mitkox/copilot-superagent/blob/main/CONTRIBUTING.md) for development and validation.
 
-Continuous repository agents inside VS Code, using the original dsh-superagent ticket engine, the official GitHub Copilot SDK, GitHub and **Microsoft Teams**.
+Continuous repository agents inside VS Code, using the MIT-licensed ticket engine adapted from dsh-superagent and the official GitHub Copilot SDK, GitHub and **Microsoft Teams**.
 
 An authorized request is assessed, assigned a persistent Copilot session and isolated Git worktree, and worked through implementation and verification. Source follow-ups, reviews and CI reach the same ticket. Acknowledgements, questions and results return to the original conversation when delivery is enabled. Supervision shows work needing attention, sources, triggers, decisions, execution, transcripts and versioned settings.
 
@@ -10,7 +10,7 @@ The service requires a running VS Code workspace extension host. Closing that ho
 
 ## Install
 
-Requirements: VS Code **1.144+**, Git, Node **22.19+**, and an installed, authenticated **GitHub Copilot CLI** compatible with SDK **1.0.28** (connection validated with CLI **1.0.105**, protocol **3**). The SDK uses existing Copilot sign-in; no OpenAI or DeepSeek key is required. Organization policies and subscription permissions apply.
+Requirements: VS Code **1.144+**, Git, Node **22.19+**, and an installed **GitHub Copilot CLI 1.0.105**, protocol **3**, authenticated with an approved **Copilot Business or Enterprise** account. The SDK is pinned to **1.0.28**. The SDK uses the CLI’s standard stored sign-in; environment authentication overrides and custom model providers are disabled. Organization policies and subscription permissions apply. Other CLI versions fail closed. See [Copilot-only enforcement](docs/copilot-only.md).
 
 Clone the repository and build the extension:
 
@@ -22,7 +22,7 @@ npm run package
 code-insiders --install-extension dist/vsc-superagent.vsix
 ```
 
-Use `code` instead for a supported stable build. The publisher `superagent-local` is a local package identity; the extension ID `superagent-local.vsc-superagent` and VSIX filename are retained for existing local installations. SDK JavaScript and adapted original prompts are bundled; the installed CLI runs through stdio. There is no extension HTTP listener or runtime download. Set `superagent.copilot.cliPath` when the executable is not on the extension host's PATH.
+Use `code` instead for a supported stable build. The publisher `superagent-local` is a local package identity; the extension ID `superagent-local.vsc-superagent` and VSIX filename are retained for existing local installations. SDK JavaScript and attributed, adapted prompts are bundled; the reviewed CLI runs through stdio. There is no extension HTTP listener or runtime download. Set `superagent.copilot.cliPath` when the executable is not on the extension host's PATH.
 
 ## Start work
 
@@ -59,7 +59,7 @@ Allowed people can mention the agent to request work. With `github.observe` enab
 
 ## Microsoft Teams
 
-Teams replaces Feishu. Use Entra tenant/user **object UUIDs**, not display names:
+Use Entra tenant/user **object UUIDs**, not display names:
 
 ```json
 {
@@ -80,7 +80,7 @@ Channel replies target the original root; chat replies use `replyWithQuote`. Con
 
 ## Policy, prompts and delivery
 
-Supervision Settings contains the versioned policy. Explicit allowed requests work in every proactive mode. `off` ignores inferred candidates; `observe` records what rules would accept; `auto` starts work matching enabled rules. Start with observe and inspect decisions before enabling proactive acceptance. Admission tables, actors/bots, worker concurrency, human priority, models, poll interval and retry limits are configurable. Saves use revision checks and history supports restoration. Unsaved drafts retain their original revision across navigation and updates; rejected saves preserve the draft.
+Supervision Settings contains the versioned policy. Explicit allowed requests work in every proactive mode. `off` ignores inferred candidates; `observe` records what rules would accept; `auto` starts work matching enabled rules. Start with observe and inspect decisions before enabling proactive acceptance. Admission tables, actors/bots, worker concurrency, human priority, unqualified Copilot model IDs, poll interval and retry limits are configurable. Saves use revision checks and history supports restoration. Unsaved drafts retain their original revision across navigation and updates; rejected saves preserve the draft.
 
 Original worker, communication, scope, delivery and GitHub instructions are packaged with Teams guidance. Team sections, built-in part overrides and team skills are editable. Overrides retain their original default; upgrades identify changed defaults. Worker/assessment previews are separate. Assessments receive source facts and a structured outcome tool without repository execution tools. Policy changes revalidate pending/running authority against the exact currently configured provider namespace. Every actual HTTP or WebSocket model request receives current worker instructions, including native child agents; an obsolete cached SDK prompt cannot retain revoked authority.
 

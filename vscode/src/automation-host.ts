@@ -244,7 +244,7 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
   function getBackend(): CopilotBackend {
     assertCurrent()
     const h = owner!
-    return backend ??= new CopilotBackend({ cliPath: config().get<string>('copilot.cliPath', 'copilot'), onPermissionRequest: async (request, invocation) => {
+    return backend ??= new CopilotBackend({ cliPath: config().get<string>('copilot.cliPath', 'copilot'), githubHost: config().get<string>('copilot.githubHost', 'github.com'), onPermissionRequest: async (request, invocation) => {
       assertCurrent()
       const ticket = h.runtime.get(invocation.ticketId)
       if (ticket.ended || h.runtime.paused) return { kind: 'reject', feedback: 'The ticket is stopped or paused.' }

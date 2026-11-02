@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { assertCopilotModel } from './copilot-policy.ts'
 import type { AcceptMode, AdmissionCell, GateResult, Mandate, Policy, SourceScope, Trigger } from '../../src/core/index.ts'
 
 export type SourceFamily = 'github' | 'teams'
@@ -96,7 +97,7 @@ export function validateSettings(value: unknown, current: AutomationSettings = D
   number(result.execution.retryBaseMs, 'retry delay', 10, 300_000)
   number(result.assessment.timeoutMs, 'assessment timeout', 100, 600_000)
   number(result.pollIntervalMs, 'poll interval', 100, 3_600_000)
-  for (const model of [result.execution.model, result.assessment.model]) if (model !== undefined) content(model, 'model', 200, false)
+  for (const model of [result.execution.model, result.assessment.model]) if (model !== undefined) assertCopilotModel(model)
   for (const key of ['communication', 'ticketScope', 'deliveryRequirements', 'worker', 'assessor'] as const) content(result.prompts[key], 'prompt')
   if (result.prompts.overrides !== undefined) {
     if (!object(result.prompts.overrides) || Object.keys(result.prompts.overrides).length > 100) throw new Error('Invalid prompt overrides')

@@ -2,7 +2,7 @@
   "name": "vsc-superagent",
   "displayName": "Superagent for Copilot",
   "description": "Continuous repository agents powered by GitHub Copilot, with GitHub and Microsoft Teams conversations.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "superagent-local",
   "license": "MIT",
   "private": true,
@@ -269,7 +269,7 @@
           "type": "string",
           "default": "copilot",
           "scope": "application",
-          "description": "Path to an installed Copilot CLI compatible with the pinned SDK. Uses existing Copilot sign-in."
+          "description": "Path to the reviewed GitHub Copilot CLI 1.0.105 (protocol 3). Uses its standard stored sign-in; environment overrides and custom providers are disabled."
         },
         "superagent.execution.permissionMode": {
           "type": "string",
@@ -322,6 +322,12 @@
           "default": false,
           "scope": "application",
           "description": "Refresh the Teams requester allowlist automatically from syncChatId while polling. Enable only after reviewing that membership authorization."
+        },
+        "superagent.copilot.githubHost": {
+          "type": "string",
+          "default": "github.com",
+          "scope": "application",
+          "description": "Copilot authentication host: github.com or one enterprise slug.ghe.com. Inference is limited to Copilot Business/Enterprise or that enterprise data-residency endpoint. Reload VS Code after changing."
         }
       }
     },

@@ -7,6 +7,7 @@ import { TicketRuntime } from './runtime.ts'
 import { automationPolicy, automationPolicyVersion, automationScope, DEFAULT_AUTOMATION_SETTINGS, sourceFamily, validateSettings } from './settings.ts'
 import type { AutomationSettings, SettingsVersion } from './settings.ts'
 import type { PendingEffect, SessionRecord } from './state.ts'
+import { assertCopilotModel } from './copilot-policy.ts'
 
 export { DEFAULT_AUTOMATION_SETTINGS, validateSettings } from './settings.ts'
 export type { AutomationSettings } from './settings.ts'
@@ -69,10 +70,26 @@ export class AutomationService {
   constructor(private readonly runtime: TicketRuntime, private readonly deps: AutomationDependencies) {
     for (const session of runtime.repositories.automation().sessions) this.knownSessions.add(session.ticketId)
     const persisted = runtime.repositories.automation().settings
-    if (persisted) validateSettings(persisted.value)
+    const upgraded = persisted && structuredClone(persisted.value)
+    let removedModel = false
+    if (upgraded) {
+      for (const role of ['execution', 'assessment'] as const) {
+        const model = upgraded[role].model
+        if (typeof model === 'string') {
+          try { assertCopilotModel(model) }
+          catch { upgraded[role].model = undefined; removedModel = true }
+        }
+      }
+      if (removedModel) upgraded.enabled = false
+      validateSettings(upgraded)
+    }
     runtime.configureAutomation(() => automationPolicy(this.settings.value, runtime.paused, this.deps.sourceNamespaces?.()), {
       scope: input => automationScope(this.settings.value, this.deps.sourceNamespaces?.()).scope(input),
     })
+    if (removedModel) {
+      this.save(upgraded!, persisted!.revision, 'restore')
+      this.problem('copilot-policy', new Error('Saved custom-provider model selections were removed. Review the Copilot models and explicitly restart the service.'))
+    }
     this.unsubscribe = runtime.repositories.onCommit(() => { this.deps.changed?.(); this.kick() })
   }
 
@@ -253,6 +270,7 @@ export class AutomationService {
       })
       if (from !== to) this.runtime.engine.policyChanged(from, to, effects)
     })
+    this.clearHealth('copilot-policy')
     this.schedulePoll(0)
     this.kick()
   }
