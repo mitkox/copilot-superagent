@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { Engine, latestAssignment, runningAssignment } from '../../src/core/index.ts'
+import { Engine, latestAssignment, runningAssignment, threadKey } from '../../src/core/index.ts'
 import type { Policy, ReportState, SourceScope, Ticket, Trigger } from '../../src/core/index.ts'
 import { DurableRepositories } from './state.ts'
 import type { SourceContext } from './sources.ts'
@@ -215,8 +215,38 @@ export class TicketRuntime {
   }
 
   matchesPullRequestSource(id: string, source: string): boolean {
-    const prefix = `github:${createHash('sha256').update(boundedText(source, 'pull request source')).digest('hex')}:pr-`
+    const prefix = source.startsWith('github:') ? `${source}:` : `github:${createHash('sha256').update(boundedText(source, 'pull request source')).digest('hex')}:pr-`
     return (this.get(id).follows ?? []).every(follow => !follow.thread.startsWith('github:') || follow.thread.startsWith(prefix))
+  }
+
+  /** Upgrade only references belonging to this exact former credential scope; retain all domain history. */
+  migratePullRequestSource(legacyKey: string, namespace: string): void {
+    if (!/^github:[a-f0-9]{64}$/.test(namespace)) throw new Error('Invalid GitHub namespace')
+    const prefix = `github:${createHash('sha256').update(legacyKey).digest('hex')}:pr-`
+    const tickets = this.list().filter(ticket => ticket.follows?.some(follow => follow.thread.startsWith(prefix)))
+    if (!tickets.length) return
+    this.repo.atomic(() => {
+      for (const ticket of tickets) {
+        for (const follow of ticket.follows ?? []) {
+          if (!follow.thread.startsWith(prefix)) continue
+          const oldKey = follow.thread, number = Number(oldKey.slice(prefix.length))
+          this.pullRequestNumber(number)
+          const ref = { source: namespace, id: String(number) }, key = threadKey(ref)
+          const old = this.repo.threads.get(oldKey), existing = this.repo.threads.get(key)
+          if (old) {
+            const thread = { ...old, ...existing, key, ref,
+              subscriptions: [...new Set([...old.subscriptions, ...existing?.subscriptions ?? []])],
+              correlated: [...new Set([...old.correlated, ...existing?.correlated ?? []])],
+              pending: [...new Set([...old.pending, ...existing?.pending ?? []])] }
+            this.repo.threads.save(thread)
+            this.repo.threads.save({ ...old, subscriptions: old.subscriptions.filter(id => id !== ticket.id) })
+          }
+          follow.thread = key
+        }
+        ticket.follows = ticket.follows?.filter((follow, index, all) => all.findIndex(item => item.thread === follow.thread) === index)
+        this.repo.tickets.save(ticket)
+      }
+    })
   }
 
   stop(id: string): Ticket { this.get(id); return this.repo.atomic(() => this.engine.stopTicket(id, 'Stopped locally by the operator')) }
@@ -262,7 +292,7 @@ export class TicketRuntime {
   }
   private pullRequestRef(number: number, source: string): { source: string; id: string } {
     const identity = boundedText(source, 'pull request source')
-    return { source: 'github', id: `${createHash('sha256').update(identity).digest('hex')}:pr-${number}` }
+    return /^github:[a-f0-9]{64}$/.test(identity) ? { source: identity, id: String(number) } : { source: 'github', id: `${createHash('sha256').update(identity).digest('hex')}:pr-${number}` }
   }
   private pullRequestNumber(number: number): void { if (!Number.isSafeInteger(number) || number <= 0) throw new Error('Invalid pull request number') }
 }

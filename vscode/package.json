@@ -2,7 +2,7 @@
   "name": "vsc-superagent",
   "displayName": "Superagent for Copilot",
   "description": "Continuous repository agents powered by GitHub Copilot, with GitHub and Microsoft Teams conversations.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "superagent-local",
   "license": "MIT",
   "private": true,
@@ -351,13 +351,19 @@
     "test": "node --import tsx --test tests/*.test.ts && vitest run --config vitest.config.ts",
     "check": "npm run typecheck && npm test && npm run build && node scripts/check-package.mjs",
     "package": "npm run check && vsce package --no-dependencies --no-rewrite-relative-links --out dist/vsc-superagent.vsix",
-    "audit:production": "npm audit --omit=dev --audit-level=low"
+    "audit:production": "npm audit --omit=dev --audit-level=low",
+    "test:offline": "node scripts/test-offline.mjs",
+    "test:editor": "npm run build && node scripts/test-editor.mjs"
   },
   "devDependencies": {
+    "@types/jsdom": "28.0.3",
     "@types/node": "22.20.0",
     "@types/vscode": "1.144.0",
+    "@types/ws": "8.18.2",
+    "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "4.1.0",
     "esbuild": "0.28.2",
+    "jsdom": "29.1.1",
     "tsx": "4.23.15",
     "typescript": "6.0.3",
     "vitest": "4.1.12"
@@ -368,6 +374,7 @@
   },
   "dependencies": {
     "@github/copilot-sdk": "1.0.28",
+    "ws": "8.22.1",
     "zod": "4.6.6"
   },
   "repository": {

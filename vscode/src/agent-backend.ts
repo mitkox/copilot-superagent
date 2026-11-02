@@ -16,14 +16,34 @@ export interface AgentRun {
   prompt: string
   systemPrompt: string
   model?: string
+  assertAuthorized?(): void
+  currentSystemPrompt?(): { text: string; revision: number }
+  onPromptApplied?(revision: number): void
+  onConsumed?(): void
   tools: AgentTool[]
   signal: AbortSignal
   onEvent(event: AgentEvent): void
 }
 
+export type RouterOutcome = AssessmentOutcome
+  | { kind: 'attach'; ticketId: string; note?: string; reason: string }
+  | { kind: 'status'; ticketId: string; reason: string }
+  | { kind: 'note'; ticketId: string; text: string; reason: string }
+
+export interface AgentSteer {
+  ticketId: string
+  requestId: string
+  prompt: string
+  signal: AbortSignal
+  onAccepted(): void
+  onConsumed(): void
+}
+
 export interface AgentBackend {
   run(input: AgentRun): Promise<void>
-  assess(prompt: string, signal: AbortSignal, model?: string): Promise<AssessmentOutcome>
+  assess(prompt: string, signal: AbortSignal, model?: string, contextTools?: AgentTool[]): Promise<RouterOutcome>
+  steer?(input: AgentSteer): Promise<void>
+  handoff?(ticketId: string): void
   abort(ticketId: string): Promise<void>
   dispose(): Promise<void>
 }

@@ -12,7 +12,7 @@ body{font:13px var(--vscode-font-family);color:var(--vscode-foreground);backgrou
 <main id="content"></main>
 <script nonce="${nonce}">
 const api = acquireVsCodeApi();
-let snapshot = {}, tab = 'Overview', dirty = false;
+let snapshot = {}, tab = 'Overview', draft, pendingSave, sequence = 0;
 const content = document.getElementById('content');
 const send = (action, payload = {}) => api.postMessage({ action, ...payload });
 function node(tag, text, parent, cls) { const el = document.createElement(tag); if (text !== undefined)
@@ -26,14 +26,13 @@ function matches(value) { return json(value).toLowerCase().includes(document.get
 function detail(parent, label, value) { const d = node('details', undefined, parent); node('summary', label, d); node('pre', json(value), d); }
 function ticketCard(ticket, parent) { const card = node('article', undefined, parent); node('h2', ticket.title, card); const report = ticket.assignments?.at(-1)?.report; node('div', (ticket.ended?.outcome || report?.state || 'queued') + ' · ' + ticket.id, card, 'badge'); if (ticket.attention)
     node('p', ticket.attention.question, card); if (report)
-    node('p', report.summary, card); const actions = node('div', undefined, card, 'toolbar'); button(actions, 'Open worktree', 'openTicket', ticket.id); button(actions, 'Follow-up', 'followup', ticket.id); if (!ticket.ended) {
-    button(actions, 'Stop', 'stopTicket', ticket.id);
+    node('p', report.summary, card); const actions = node('div', undefined, card, 'toolbar'); button(actions, 'Open worktree', 'openTicket', ticket.id); button(actions, 'Follow-up', 'followup', ticket.id); if (ticket.ended) button(actions, 'Stop background jobs', 'stopTicket', ticket.id); if (!ticket.ended) {
+    button(actions, 'Request status', 'requestStatus', ticket.id); button(actions, 'Stop', 'stopTicket', ticket.id);
     if (['blocked', 'failed'].includes(report?.state))
         button(actions, 'Retry', 'retry', ticket.id);
 } button(actions, 'Read conversation', 'conversation', ticket.id); const trace = rows('sessions').find(s => s.ticketId === ticket.id); if (trace)
     detail(card, 'Copilot session and transcript', trace); detail(card, 'Ticket, mandate and inputs', ticket); }
 function render() {
-    const saved = tab === 'Settings' && dirty ? document.getElementById('settings')?.value : undefined;
     content.replaceChildren();
     document.querySelectorAll('[data-tab]').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
     const tickets = rows('tickets').filter(matches);
@@ -97,14 +96,16 @@ function render() {
         const editor = node('textarea', undefined, content);
         editor.id = 'settings';
         editor.setAttribute('aria-label', 'Superagent settings JSON');
-        editor.value = saved ?? json(snapshot.settings?.value || {});
-        editor.oninput = () => { dirty = true; };
+        editor.value = draft?.text ?? json(snapshot.settings?.value || {});
+        editor.oninput = () => { draft = { text: editor.value, revision: draft?.revision ?? snapshot.settings?.revision ?? 0 }; };
         const tools = node('div', undefined, content, 'toolbar');
         const save = button(tools, 'Save settings', 'unused');
-        save.onclick = () => { try {
+        save.disabled = !!pendingSave;
+        save.onclick = () => { if (pendingSave) return; try {
             const value = JSON.parse(editor.value);
-            send('saveSettings', { value, revision: snapshot.settings?.revision || 0 });
-            dirty = false;
+            pendingSave = { requestId: ++sequence, text: editor.value, revision: draft?.revision ?? snapshot.settings?.revision ?? 0 };
+            send('saveSettings', { value, revision: pendingSave.revision, requestId: pendingSave.requestId });
+            save.disabled = true;
         }
         catch {
             document.getElementById('notice').textContent = 'Settings must be valid JSON.';
@@ -127,6 +128,15 @@ document.querySelectorAll('[data-tab]').forEach(el => el.onclick = () => { tab =
 document.getElementById('search').oninput = render;
 window.addEventListener('message', event => { if (event.data.type === 'state') {
     snapshot = event.data.value;
+    render();
+}
+else if (event.data.type === 'saveSettingsResult' && pendingSave?.requestId === event.data.requestId) {
+    if (event.data.success) {
+        if (draft?.text === pendingSave.text) draft = undefined;
+        else if (draft && draft.revision === pendingSave.revision) draft.revision = event.data.revision;
+    }
+    else document.getElementById('notice').textContent = 'Settings were not saved. Your draft is retained.';
+    pendingSave = undefined;
     render();
 }
 else if (event.data.type === 'notice')

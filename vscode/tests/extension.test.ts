@@ -1,13 +1,15 @@
 import { buildSync } from "esbuild";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 
+import { resolveGit } from "../src/worktree.ts";
+const gitExecutable = resolveGit("git");
 const requireModule = createRequire(import.meta.url);
 const code = buildSync({
   entryPoints: ["src/extension.ts"],
@@ -20,11 +22,11 @@ const code = buildSync({
 }).outputFiles[0]!.text;
 
 function fixture() {
-  const temporary = mkdtempSync(join(tmpdir(), "superagent-extension-"));
+  const temporary = realpathSync.native(mkdtempSync(join(tmpdir(), "superagent-extension-")));
   const root = join(temporary, "repo");
   mkdirSync(root);
   const git = (...args: string[]) =>
-    execFileSync("/usr/bin/git", args, { cwd: root, encoding: "utf8" });
+    execFileSync(gitExecutable, args, { cwd: root, encoding: "utf8" });
   git("init", "-q");
   git("config", "user.name", "Test");
   git("config", "user.email", "test@example.invalid");
@@ -53,11 +55,14 @@ function fixture() {
     requests: URL[] = [],
     signins: string[][] = [];
   const disposable = { dispose() {} };
+  const panelMessages: any[] = [];
+  let panelAction: ((message: Record<string, unknown>) => Promise<void>) | undefined;
   let promptCount = 0,
     gitActivations = 0;
   let approve = true;
   let onConfirm: (() => void) | undefined, onSignIn: (() => void) | undefined;
   let response: unknown = { value: [] };
+  let processStarts = 0;
   const api: any = {
     workspace: {
       isTrusted: true,
@@ -83,11 +88,21 @@ function fixture() {
         isActive: false,
         activate: async () => {
           gitActivations++;
-          return { getAPI: () => ({ git: { path: "/usr/bin/git" } }) };
+          return { getAPI: () => ({ git: { path: gitExecutable } }) };
         },
       }),
     },
     window: {
+      createWebviewPanel: () => ({
+        webview: {
+          html: "",
+          postMessage: async (message: unknown) => { panelMessages.push(message); },
+          onDidReceiveMessage: (callback: typeof panelAction) => { panelAction = callback; return disposable; },
+        },
+        reveal() {},
+        onDidDispose: () => disposable,
+        dispose() {},
+      }),
       registerTreeDataProvider: () => disposable,
       showInputBox: async () => {
         promptCount++;
@@ -144,7 +159,8 @@ function fixture() {
         return { accessToken: "private-graph-token" };
       },
     },
-    Uri: { file: (path: string) => ({ fsPath: path }) },
+    Uri: { file: (path: string) => ({ fsPath: path }), joinPath: (uri: { fsPath: string }, ...parts: string[]) => ({ fsPath: join(uri.fsPath, ...parts) }) },
+    ViewColumn: { One: 1 },
     ConfigurationTarget: { Global: 1 },
     EventEmitter: class {
       event = () => disposable;
@@ -159,7 +175,12 @@ function fixture() {
       constructor(public value: string) {}
     },
   };
+  const extensionRoot = join(temporary, "extension");
+  mkdirSync(join(extensionRoot, "dist/prompts"), { recursive: true });
+  writeFileSync(join(extensionRoot, "dist/prompts/worker.md"), "Test worker");
+  writeFileSync(join(extensionRoot, "dist/prompts/defaults.json"), "{}");
   const context: any = {
+    extensionUri: { fsPath: extensionRoot },
     subscriptions: [],
     globalStorageUri: { fsPath: join(temporary, "storage") },
     globalState: {
@@ -183,7 +204,18 @@ function fixture() {
   runInNewContext(code, {
     module,
     exports: module.exports,
-    require: (name: string) => (name === "vscode" ? api : requireModule(name)),
+    require: (name: string) => {
+      if (name === "vscode") return api;
+      const loaded = requireModule(name);
+      if (name === "node:child_process") return {
+        ...loaded,
+        spawn: (...args: unknown[]) => {
+          processStarts++;
+          return loaded.spawn(...args);
+        },
+      };
+      return loaded;
+    },
     process: sandboxProcess,
     Buffer,
     structuredClone,
@@ -221,6 +253,8 @@ function fixture() {
     values,
     context,
     state,
+    panelMessages,
+    panelAction: (message: Record<string, unknown>) => panelAction!(message),
     environment: sandboxProcess.env,
     response: (value: unknown) => {
       response = value;
@@ -245,6 +279,9 @@ function fixture() {
     },
     get gitActivations() {
       return gitActivations;
+    },
+    get processStarts() {
+      return processStarts;
     },
     reload() {
       deactivate();
@@ -606,6 +643,52 @@ test("Teams uses tenant-pinned least-privilege native sign-in and configuration 
   }
 });
 
+test("continuous Teams polling isolates two direct chats, a group chat and a channel", async () => {
+  const f = fixture();
+  try {
+    const tenant = "11111111-1111-1111-1111-111111111111";
+    const actor = "22222222-2222-2222-2222-222222222222";
+    const account = "44444444-4444-4444-4444-444444444444";
+    const chats = ["19:direct-one@thread.v2", "19:direct-two@thread.v2", "19:group@thread.v2"];
+    f.values["superagent.teams.tenantId"] = tenant;
+    f.values["superagent.teams.chatIds"] = chats;
+    f.values["superagent.teams.channels"] = [{ teamId: "33333333-3333-3333-3333-333333333333", channelId: "19:channel@thread.tacv2" }];
+    f.values["superagent.teams.allowedActors"] = [actor];
+    f.response((url: URL) => {
+      if (url.pathname === "/v1.0/me") return { id: account };
+      const path = decodeURIComponent(url.pathname);
+      const chat = chats.find(id => path === `/v1.0/chats/${id}`);
+      if (chat) return { id: chat, chatType: chat === chats[2] ? "group" : "oneOnOne" };
+      if (path.endsWith("/replies")) return { value: [] };
+      if (path.endsWith("/messages")) return { value: [{
+        id: "100", messageType: "message", createdDateTime: new Date().toISOString(),
+        from: { user: { id: actor, tenantId: tenant } }, body: { contentType: "text", content: "Review this request" },
+      }] };
+      assert.fail(`Unexpected Graph request: ${path}`);
+    });
+    await f.command("dashboard");
+    await f.panelAction({ action: "refresh" });
+    const snapshot = () => f.panelMessages.findLast(message => message.type === "state").value;
+    await f.panelAction({ action: "saveSettings", revision: snapshot().settings.revision, value: { enabled: true } });
+    await f.panelAction({ action: "poll" });
+    assert.equal(f.panelMessages.some(message => message.type === "notice"), false);
+    assert.deepEqual(f.errors, []);
+    const messages = f.requests.filter(url => decodeURIComponent(url.pathname).endsWith("/messages"));
+    assert.equal(messages.length, 4);
+    const triggers = snapshot().triggers;
+    assert.equal(triggers.length, 4);
+    for (const chatId of chats) {
+      const trigger = triggers.find((item: any) => item.meta.provider.chatId === chatId);
+      assert.ok(trigger, `Polled ${chatId}`);
+      assert.equal(trigger.addressed, chatId === chats[2] ? undefined : "direct");
+    }
+    assert.equal(triggers.find((item: any) => item.meta.provider.channelId)?.addressed, undefined);
+    assert.equal(f.processStarts, 0);
+  } finally {
+    f.close();
+  }
+});
+
 test("a failing channel does not block a GitHub candidate or its independent cursor", async () => {
   const f = fixture();
   try {
@@ -823,4 +906,33 @@ test("GitHub source changes during SecretStorage retrieval and credential remova
   } finally {
     f.close();
   }
+});
+
+
+test('model routing requires exact native consent and cancelled consent cannot grant a mandate', async () => {
+  const f = fixture();
+  try {
+    f.values['superagent.copilot.cliPath'] = 'superagent-test-missing-copilot';
+    f.approve(false);
+    const before = f.promptCount;
+    await f.invoke('superagent_route', { request: 'Run the quoted request' });
+    assert.equal(f.promptCount, before + 1);
+    const status = await f.invoke('superagent_route', { status: true });
+    assert.equal(JSON.parse(status.content[0]!.value).tickets.length, 0);
+    f.approve(true);
+    const token = { isCancellationRequested: false };
+    f.onConfirm(() => { token.isCancellationRequested = true; });
+    await assert.rejects(() => f.invoke('superagent_route', { request: 'Repair only file A' }, token), /Cancelled/);
+    assert.equal(JSON.parse((await f.invoke('superagent_route', { status: true })).content[0]!.value).tickets.length, 0);
+    f.onConfirm(() => {});
+    const created = await f.invoke('superagent_route', { request: 'Repair only file A' });
+    assert.ok(JSON.parse(created.content[0]!.value).ticketId);
+    const snapshot = JSON.parse((await f.invoke('superagent_route', { status: true })).content[0]!.value);
+    assert.equal(snapshot.tickets.length, 1);
+    assert.equal(snapshot.health.running, false);
+    await f.command('stopService');
+    assert.equal(f.errors.length, 0);
+  } finally { f.close(); }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.processStarts, 0);
 });

@@ -10,7 +10,7 @@ import { ticketPermission } from './permissions.ts'
 import type { TicketRuntime } from './runtime.ts'
 import type { Worktrees } from './worktree.ts'
 import type { GitHubSourceConfig, GitHubReviewCursor, SourceContext, TeamsBatchCursor, TeamsSourceConfig } from './sources.ts'
-import { discoverOwnPullRequests, githubThreadRef, pollDefaultBranchChecks, pollGitHub, pollGitHubChecks, pollGitHubReviewsBatch, pollTeamsBatch, readPullRequest, sourceRequest, sourceSubscription, sourceTrigger } from './sources.ts'
+import { discoverOwnPullRequestsBatch, githubThreadRef, pollDefaultBranchChecks, pollGitHub, pollGitHubChecks, pollGitHubReviewsBatch, pollTeamsBatch, readPullRequest, sourceNamespace, sourceRequest, sourceSubscription, sourceTrigger } from './sources.ts'
 import { resolveGitHubReviewThread } from './delivery.ts'
 import type { GitHubDeliveryCredential, TeamsDeliveryCredential } from './delivery.ts'
 import { readTeamsMembers } from './membership.ts'
@@ -25,7 +25,7 @@ export interface AutomationHooks {
   github(): Promise<GitHubSourceConfig>
   changed(): void
 }
-export interface AutomationLifecycle extends vscode.Disposable { shutdown(): Promise<void>; readonly active: boolean }
+export interface AutomationLifecycle extends vscode.Disposable { shutdown(): Promise<void>; readonly active: boolean; stopTicket(ticketId: string): Promise<void> }
 const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 
@@ -42,9 +42,12 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
 
   function sourcePolicy() {
     const c = config()
-    return { github: { enabled: !!c.get<string>('github.repository'), allowedActors: c.get<string[]>('github.allowedActors', []),
+    return { github: { enabled: !!c.get<string>('github.repository'), namespaces: c.get<string>('github.repository') ? [sourceNamespace({ provider: 'github', origin: c.get('github.origin', 'https://api.github.com'), repository: c.get('github.repository', '') })] : [], allowedActors: c.get<string[]>('github.allowedActors', []),
       allowedBots: c.get<string[]>('github.allowedBots', []), allowUnaddressed: c.get('github.observe', false) },
-    teams: { enabled: !!c.get<string>('teams.tenantId'), allowedActors: c.get<string[]>('teams.allowedActors', []),
+    teams: { enabled: !!c.get<string>('teams.tenantId'), namespaces: [
+      ...c.get<string[]>('teams.chatIds', []).map(chatId => sourceNamespace({ provider: 'teams', tenantId: c.get('teams.tenantId', ''), chatId })),
+      ...c.get<TeamsSourceConfig['channels']>('teams.channels', []).map(channel => sourceNamespace({ provider: 'teams', tenantId: c.get('teams.tenantId', ''), ...channel })),
+    ], allowedActors: c.get<string[]>('teams.allowedActors', []),
       allowedBots: c.get<string[]>('teams.allowedBots', []), allowUnaddressed: true } }
   }
 
@@ -71,7 +74,18 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
       channels: config().get('teams.channels', []), actors: config().get('teams.allowedActors'), writing })) throw new Error('Teams configuration changed while reading account identity')
     const accountId = record(identity.value) && typeof identity.value.id === 'string' ? identity.value.id : ''
     if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(accountId)) throw new Error('Microsoft sign-in did not identify the sender')
-    return { provider: 'teams', mode: 'delegated', tenantId, chatIds, channels, allowedActors: c.get('teams.allowedActors', []),
+    const directChatIds: string[] = []
+    for (const chatId of chatIds) {
+      const url = new URL(`https://graph.microsoft.com/v1.0/chats/${encodeURIComponent(chatId)}`)
+      url.searchParams.set('$select', 'id,chatType')
+      const chat = await sourceRequest(url, session.accessToken, undefined, fetch)
+      assertCurrent()
+      if (!record(chat.value) || chat.value.id !== chatId || !['oneOnOne', 'group', 'meeting'].includes(String(chat.value.chatType))) throw new Error('Graph did not verify the configured chat type')
+      if (chat.value.chatType === 'oneOnOne') directChatIds.push(chatId)
+    }
+    if (scope !== fingerprint({ tenantId: config().get('teams.tenantId', ''), chatIds: config().get('teams.chatIds', []),
+      channels: config().get('teams.channels', []), actors: config().get('teams.allowedActors'), writing })) throw new Error('Teams configuration changed while verifying chats')
+    return { provider: 'teams', mode: 'delegated', tenantId, chatIds, channels, directChatIds, allowedActors: c.get('teams.allowedActors', []),
       allowedBots: c.get('teams.allowedBots', []), accountId, token: session.accessToken, scopes: scopes.map(scope => scope.slice(scope.lastIndexOf('/') + 1)) }
   }
   async function github(writing = false): Promise<GitHubDeliveryCredential> {
@@ -106,7 +120,7 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
           const provider = trigger.meta.provider as SourceContext | undefined
           return provider?.provider === 'github' && provider.isPullRequest && trigger.source === ref.source && subscribed.has(provider.number) ? [provider.number] : []
         }), ...h.runtime.list().flatMap(ticket => (ticket.follows ?? []).filter(follow => follow.thread.startsWith(`${ref.source}:`)).map(follow => Number(follow.thread.slice(ref.source.length + 1))))])]
-        const cfg = { ...base, since: previous?.since ?? new Date(Date.now() - 86400000).toISOString(), subscribedNumbers,
+        const cfg = { ...base, receiveUnlisted: Object.values(service!.settings.value.sources.github.admission ?? {}).some(mode => mode !== 'ignore'), since: previous?.since ?? new Date(Date.now() - 86400000).toISOString(), subscribedNumbers,
           observeIssues: sourceSettings.github.allowUnaddressed, observePullRequests: sourceSettings.github.allowUnaddressed,
           observeComments: sourceSettings.github.allowUnaddressed, observeReviews: sourceSettings.github.allowUnaddressed }
         const items = await pollGitHub(cfg, signal)
@@ -122,7 +136,11 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
           try { h.runtime.engine.receive(await pollDefaultBranchChecks(cfg, signal)) }
           catch { signal.throwIfAborted(); errors.push('Default-branch CI could not be read.') }
         }
-        for (const pull of await discoverOwnPullRequests(base, signal)) {
+        try {
+          const discoveryKey = `discovery:${ref.source}`
+          const batch = await discoverOwnPullRequestsBatch(base, h.runtime.readData<number>(discoveryKey), signal)
+          h.runtime.repositories.atomic(() => {
+        for (const pull of batch.items) {
           const id = /^superagent\/([a-f0-9]{32})$/.exec(pull.branch)?.[1]
           const ticket = id ? h.runtime.list().find(ticket => ticket.id === id && !ticket.ended) : undefined
           if (ticket) {
@@ -131,6 +149,9 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
             if (!prNumbers.includes(pull.number)) prNumbers.push(pull.number)
           }
         }
+            h.runtime.writeData(discoveryKey, batch.nextPage)
+          })
+        } catch { signal.throwIfAborted(); errors.push('Own PR discovery could not advance; existing PRs remain monitored.') }
         for (const number of prNumbers) {
           try {
             const checks = await pollGitHubChecks(cfg, [number], signal)
@@ -161,7 +182,7 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
               const provider = trigger.meta.provider as SourceContext | undefined
               return provider?.provider === 'teams' && trigger.threads.some(ref => activeThreads.has(threadKey(ref))) ? [String(sourceSubscription(provider))] : []
             }))]
-            const batch = await pollTeamsBatch({ ...base, ...scope, since, subscribedThreads }, previous?.cursor, signal)
+            const batch = await pollTeamsBatch({ ...base, ...scope, directChatIds: base.directChatIds?.filter(chat => scope.chatIds.includes(chat)), receiveUnlisted: Object.values(service!.settings.value.sources.teams.admission ?? {}).some(mode => mode !== 'ignore'), since, subscribedThreads }, previous?.cursor, signal)
             commit(key, batch.items.map(sourceTrigger), { since: batch.next ? since : started, started, ...(batch.next ? { cursor: batch.next } : {}) })
           } catch (error) {
             signal.throwIfAborted()
@@ -220,26 +241,38 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
     return thread
   }
 
+  function getBackend(): CopilotBackend {
+    assertCurrent()
+    const h = owner!
+    return backend ??= new CopilotBackend({ cliPath: config().get<string>('copilot.cliPath', 'copilot'), onPermissionRequest: async (request, invocation) => {
+      assertCurrent()
+      const ticket = h.runtime.get(invocation.ticketId)
+      if (ticket.ended || h.runtime.paused) return { kind: 'reject', feedback: 'The ticket is stopped or paused.' }
+      if (ticketPermission(request, invocation.directory, config().get<string>('execution.permissionMode', 'ask') === 'ticket') === 'allow') return { kind: 'approve-once' }
+      const answer = await vscode.window.showWarningMessage(`Allow ${request.kind} for ${ticket.title}?`,
+        { modal: true, detail: JSON.stringify(request, null, 2).slice(0, 18000) }, 'Allow once')
+      assertCurrent()
+      if (h.runtime.get(ticket.id).ended || h.runtime.paused) return { kind: 'reject', feedback: 'Authorization was withdrawn.' }
+      return answer === 'Allow once' ? { kind: 'approve-once', approvedInteractively: true } : { kind: 'reject', feedback: 'Declined by the operator.' }
+    } })
+  }
+
   async function get(): Promise<AutomationService> {
     assertCurrent()
     if (service) return service
     if (initializing) return initializing
     initializing = (async () => {
       const h = owner = await hooks.host()
-      backend = new CopilotBackend({ cliPath: config().get<string>('copilot.cliPath', 'copilot'), onPermissionRequest: async (request, invocation) => {
-        assertCurrent()
-        const ticket = h.runtime.get(invocation.ticketId)
-        if (ticket.ended || h.runtime.paused) return { kind: 'reject', feedback: 'The ticket is stopped or paused.' }
-        if (ticketPermission(request, invocation.directory, config().get<string>('execution.permissionMode', 'ask') === 'ticket') === 'allow') return { kind: 'approve-once' }
-        const answer = await vscode.window.showWarningMessage(`Allow ${request.kind} for ${ticket.title}?`,
-          { modal: true, detail: JSON.stringify(request, null, 2).slice(0, 18000) }, 'Allow once')
-        assertCurrent()
-        if (h.runtime.get(ticket.id).ended || h.runtime.paused) return { kind: 'reject', feedback: 'Authorization was withdrawn.' }
-        return answer === 'Allow once' ? { kind: 'approve-once', approvedInteractively: true } : { kind: 'reject', feedback: 'Declined by the operator.' }
-      } })
       const prompt = await readFile(vscode.Uri.joinPath(context.extensionUri, 'dist', 'prompts', 'worker.md').fsPath, 'utf8').catch(() => '')
       const promptParts: Record<string, string> = JSON.parse(await readFile(vscode.Uri.joinPath(context.extensionUri, 'dist', 'prompts', 'defaults.json').fsPath, 'utf8').catch(() => '{}'))
-      service = new AutomationService(h.runtime, { backend, prepare: ticket => h.trees.prepare(ticket.id), poll, send, changed: notify,
+      service = new AutomationService(h.runtime, { backend: {
+        run: input => getBackend().run(input),
+        assess: (...args) => getBackend().assess(...args),
+        steer: input => getBackend().steer(input),
+        handoff: ticketId => backend?.handoff(ticketId),
+        abort: async ticketId => { await backend?.abort(ticketId) },
+        dispose: async () => { await backend?.dispose() },
+      }, sourceNamespaces: () => { const p = sourcePolicy(); return { github: p.github.namespaces, teams: p.teams.namespaces } }, prepare: ticket => h.trees.prepare(ticket.id), poll, send, changed: notify,
         systemPrompt: prompt, promptParts, claimPullRequest,
         resolveThread: async (family, id, signal) => {
           if (family !== 'github' || !/^[1-9]\d*$/.test(id)) throw new Error('Use a complete scoped Teams thread identity')
@@ -275,7 +308,7 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
     await config().update('delivery.enabled', writes === 'Enable replies', vscode.ConfigurationTarget.Global)
     if (sourcePolicy().teams.enabled) await teams(writes === 'Enable replies', true)
     const s = await get()
-    const health = await backend!.check()
+    const health = await getBackend().check()
     if (!health.authenticated) throw new Error('Sign in to the configured Copilot CLI before starting Superagent')
     s.saveSettings({ ...s.settings.value, enabled: true, sources: sourcePolicy() }, s.settings.revision)
     await config().update('service.enabled', true, vscode.ConfigurationTarget.Global)
@@ -304,7 +337,8 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
         h.runtime.get(id); const text = await vscode.window.showInputBox({ prompt: 'Continue this ticket with an in-scope request', ignoreFocusOut: true })
         assertCurrent(); if (text?.trim()) { h.runtime.followup(id, text); s.kick() } break
       }
-      case 'stopTicket': h.runtime.stop(id); s.kick(); break
+      case 'requestStatus': h.runtime.engine.requestStatus(id); s.kick(); break
+      case 'stopTicket': await s.stopTicket(id); break
       case 'retry': h.runtime.retry(id); s.kick(); break
       case 'retryEffect': s.retryEffect(id); break
       case 'unsubscribe': h.runtime.engine.unsubscribe(id); s.kick(); break
@@ -334,7 +368,7 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
   register('dashboard', async () => { await get(); panel.show() })
   register('startService', start)
   register('stopService', () => action({ action: 'stopService' }))
-  register('checkService', async () => { await get(); const status = await backend!.check(); await vscode.window.showInformationMessage(`Copilot ${status.cliVersion}: ${status.authenticated ? 'signed in' : 'sign-in required'}. No model request was sent.`) })
+  register('checkService', async () => { await get(); const status = await getBackend().check(); await vscode.window.showInformationMessage(`Copilot ${status.cliVersion}: ${status.authenticated ? 'signed in' : 'sign-in required'}. No model request was sent.`) })
   register('syncTeamsMembers', () => syncMembers(true))
 
   if (vscode.chat?.createChatParticipant) {
@@ -353,18 +387,31 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
   }
   context.subscriptions.push(vscode.lm.registerTool<{ request?: string; ticketId?: string; status?: boolean }>('superagent_route', {
     async invoke(options, token) {
-      const s = await get()
-      if (options.input.status === true) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify(s.snapshot()))])
-      const request = options.input.request
-      if (typeof request !== 'string' || !request.trim() || request.length > 50000) throw new Error('Provide the original approved request')
+      if (options.input.status === true) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify((await get()).snapshot()))])
+      const request = options.input.request, ticketId = options.input.ticketId
+      if (typeof request !== 'string' || !request.trim() || request.length > 50000 || request.includes('\0')) throw new Error('Provide the original approved request')
+      if (ticketId !== undefined && (typeof ticketId !== 'string' || !/^[a-f0-9]{32}$/.test(ticketId))) throw new Error('Invalid ticket identifier')
+      assertCurrent()
+      const root = hooks.guard()
       if (token.isCancellationRequested) throw new Error('Cancelled')
-      const ticket = options.input.ticketId ? owner!.runtime.followup(options.input.ticketId, request) : owner!.runtime.create(request); s.kick()
+      const approval = await vscode.window.showWarningMessage('Delegate this request to a persistent Copilot worker?',
+        { modal: true, detail: `${ticketId ? `Follow up ticket ${ticketId}` : 'Create a new ticket'}\n\n${request}` }, 'Delegate')
+      if (approval !== 'Delegate') return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({ cancelled: true }))])
+      if (token.isCancellationRequested) throw new Error('Cancelled')
+      assertCurrent()
+      if (hooks.guard() !== root) throw new Error('Workspace changed during approval')
+      const s = await get()
+      if (token.isCancellationRequested) throw new Error('Cancelled')
+      assertCurrent()
+      if (hooks.guard() !== root) throw new Error('Workspace changed during approval')
+      const ticket = ticketId ? owner!.runtime.followup(ticketId, request) : owner!.runtime.create(request); s.kick()
       return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(JSON.stringify({ ticketId: ticket.id, title: ticket.title, automated: s.settings.value.enabled }))])
     }
   }))
   if (config().get('service.enabled', false)) void get().then(s => { if (s.settings.value.enabled) s.start() }).catch(() => {})
   const disposable: AutomationLifecycle = {
     get active() { return !!service },
+    async stopTicket(ticketId) { assertCurrent(); if (service) await service.stopTicket(ticketId); else (await hooks.host()).runtime.stop(ticketId) },
     shutdown() {
       closing = true; panel.dispose()
       return shutdownPromise ??= (async () => {

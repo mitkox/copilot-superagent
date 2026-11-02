@@ -17,6 +17,7 @@ import {
   pollGitHubReviewsBatch,
   pollTeamsBatch,
   readPullRequest,
+  sourceNamespace,
   SourceError,
 } from "./sources.ts";
 import { resolveGit, Worktrees } from "./worktree.ts";
@@ -330,19 +331,19 @@ export function activate(context: vscode.ExtensionContext): void {
     } else if (action === "Refresh followed pull requests") {
       const config = await github();
       const fingerprint = sourceFingerprint();
-      for (const followed of ticket.follows ?? []) {
-        if (!h.runtime.matchesPullRequestSource(ticket.id, githubKey()))
+      for (const followed of h.runtime.get(ticket.id).follows ?? []) {
+        if (!h.runtime.matchesPullRequestSource(ticket.id, githubBinding()))
           throw new OperatorError(
             "The GitHub repository differs from this ticket’s PR binding. Restore its approved source configuration before refreshing.",
           );
-        const number = Number(/:pr-(\d+)$/.exec(followed.thread)?.[1]);
+        const number = Number(followed.thread.slice(githubBinding().length + 1));
         const pr = await readPullRequest(config, number, abort.signal);
         verifySources(fingerprint);
         if (pr.state === "closed")
           h.runtime.closePullRequest(
             number,
             pr.merged ? "merged" : "closed",
-            githubKey(),
+            githubBinding(),
           );
       }
     } else if (action === "Open isolated worktree") {
@@ -400,7 +401,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   register("stop", async () => {
     const h = await host(),
-      ticket = await choose(h.runtime, (ticket) => !ticket.ended);
+      ticket = await choose(h.runtime, () => true);
     if (
       ticket &&
       (await confirm(
@@ -408,7 +409,8 @@ export function activate(context: vscode.ExtensionContext): void {
         "Stops future Superagent work. Also press Stop in Copilot Chat to cancel any native tools already running. Worktrees are retained for review.",
       ))
     )
-      h.runtime.stop(ticket.id);
+      if (automation?.active) await automation.stopTicket(ticket.id);
+      else h.runtime.stop(ticket.id);
   });
   register("retry", async () => {
     const h = await host(),
@@ -460,6 +462,9 @@ export function activate(context: vscode.ExtensionContext): void {
   function githubKey(): string {
     return `github:${hash(JSON.stringify([settings().get("github.origin"), settings().get("github.repository")]))}`;
   }
+  function githubBinding(): string {
+    return sourceNamespace({ provider: 'github', origin: settings().get('github.origin', 'https://api.github.com'), repository: settings().get('github.repository', '') });
+  }
   async function github(): Promise<GitHubSourceConfig> {
     const c = settings(),
       fingerprint = sourceFingerprint();
@@ -469,6 +474,7 @@ export function activate(context: vscode.ExtensionContext): void {
       throw new OperatorError(
         "Configure a GitHub read credential for this exact origin/repository with Superagent: Configure Source Credential.",
       );
+    current?.runtime.migratePullRequestSource(githubKey(), githubBinding());
     return {
       origin: c.get("github.origin", "https://api.github.com"),
       repository: c.get("github.repository", ""),
@@ -896,7 +902,8 @@ export function activate(context: vscode.ExtensionContext): void {
                   input.pullRequest < 1))
             )
               throw new OperatorError("Invalid report input.");
-            const binding = githubKey();
+            const binding = githubBinding();
+            if (input.pullRequest !== undefined) h.runtime.migratePullRequestSource(githubKey(), binding);
             if (
               !(await confirm(
                 `Record ${input.state} report for ${plain(ticket.title)}?`,
@@ -911,7 +918,7 @@ export function activate(context: vscode.ExtensionContext): void {
             if (input.pullRequest !== undefined) {
               if (
                 !settings().get<string>("github.repository") ||
-                binding !== githubKey()
+                binding !== githubBinding()
               )
                 throw new OperatorError(
                   "A stable GitHub repository configuration is required to bind a PR.",
