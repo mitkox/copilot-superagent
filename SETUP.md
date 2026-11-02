@@ -1,4 +1,6 @@
-# SETUP
+# Legacy DSH prototype setup
+
+> For Copilot Superagent in VS Code, follow the [extension guide](vscode/README.md). The instructions below install the original DSH/Feishu prototype and do not configure the VS Code extension. The current repository is [mitkox/copilot-superagent](https://github.com/mitkox/copilot-superagent).
 
 Instructions for an agent that sets up dsh-superagent with its operator. If you are a person, ask your coding agent to read this file and follow it.
 

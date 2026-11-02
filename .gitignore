@@ -2,6 +2,8 @@ node_modules/
 lib/
 .artifacts/
 .env
+.env.*
+*.vsix
 coverage/
 vscode/dist/
 

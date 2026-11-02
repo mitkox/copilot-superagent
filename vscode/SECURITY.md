@@ -34,4 +34,4 @@ Local checks cover product telemetry, known Copilot/Agent Host exporters and deb
 
 Before rollout, build from the lockfile, run checks/audits, inspect the VSIX/hash, and sign/distribute through the approved extension process. Validate exact editor/CLI/OS versions, allowed/denied tenants and senders, replies, revoked credentials, conditional access, pagination, cancellation and crash recovery in a test repository/tenant. Inspect traffic and classify source/model data. Fixtures and registration smoke tests do not qualify tenant access, scale or release readiness.
 
-Report security findings privately to deployment maintainers; never post tokens or confidential source/ticket content publicly.
+For project vulnerabilities, follow the repository's [private security reporting process](https://github.com/mitkox/copilot-superagent/blob/main/SECURITY.md). Report deployment-specific findings privately to deployment maintainers; never post tokens or confidential source/ticket content publicly.

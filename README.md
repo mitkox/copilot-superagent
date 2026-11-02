@@ -1,47 +1,56 @@
-# Superagent for VS Code and GitHub Copilot
+# Copilot Superagent
 
-The native VS Code adaptation lives in [vscode/](vscode/README.md). It reuses the original ticket engine with persistent Copilot workers, isolated Git worktrees, continuous GitHub / **Microsoft Teams** intake, policy routing and original-conversation replies. Supervision exposes source context, decisions, transcripts and versioned policy/prompts. Native setup controls execution and sending; the extension uses the official Copilot SDK without a DSH runtime or HTTP listener.
+[![VS Code extension checks](https://github.com/mitkox/copilot-superagent/actions/workflows/vscode.yml/badge.svg)](https://github.com/mitkox/copilot-superagent/actions/workflows/vscode.yml)
 
-Build and install the local extension using [the VS Code guide](vscode/README.md). Read [the security boundaries and deployment requirements](vscode/SECURITY.md) before enterprise rollout. Local validation does not establish tenant approval or production qualification.
+Continuous repository agents inside VS Code, powered by GitHub Copilot. Turn authorized requests from Copilot Chat, GitHub, and Microsoft Teams into persistent coding sessions with isolated Git worktrees, then review their work in one supervision panel.
 
-The material below describes the original research prototype. Its DSH setup, permissions and Feishu integration are legacy reference material and are not used by the VS Code extension.
+The project lives at **[mitkox/copilot-superagent](https://github.com/mitkox/copilot-superagent)**. It adapts the original MIT-licensed dsh-superagent research prototype for VS Code and the official GitHub Copilot SDK.
 
-# Original dsh-superagent prototype
+## What it does
 
-> **Research prototype for reference only, not an official DeepSeek product.** This code grew out of our team's day-to-day development work, with much of the engineering done by coding agents. Treat it as research code, not production-ready software. It may still contain bugs, and its coding style and engineering practices may be inconsistent. Review and adapt it before using it in your own environment.
->
-> We have adapted it for publication, so it is not identical to our internal version or the implementation described in *Exploring Super-agent Design: Towards a More Autonomous Agent System*. Some designs discussed in the article are directions for future development and are not implemented in this prototype.
+- Routes authorized requests into tickets with persistent Copilot sessions and a separate Git worktree for each ticket.
+- Follows GitHub issues, pull requests, reviews, and CI, plus approved Microsoft Teams chats and channels.
+- Returns acknowledgements, questions, and results to the original conversation when source replies are enabled.
+- Shows source context, decisions, transcripts, pending operations, and versioned policy and prompts in supervision.
+- Supports per-tool confirmation or execution within operator-approved ticket mandates. Proactive work requires configured rules.
 
-dsh-superagent is a proactive coding agent for one GitHub repository, packaged as a bundle for [DeepSeek Harness](https://www.deepseek.com/en/harness/). It listens to GitHub and, optionally, Feishu. When someone allowed asks the agent for work, it opens a work item, works on it in its own agent session and directory, and answers in the original conversation, for example with a pull request. A web panel shows what needs a person.
+The service runs while its VS Code workspace extension host is open. An enabled service resumes when that host reopens. Worktrees preserve the primary checkout's dirty files; commands still run with the operator's OS privileges.
 
-It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
+## Build and install
 
-## Setup
+You need VS Code **1.144+**, Git, Node.js **22.19+**, and an installed, authenticated **GitHub Copilot CLI** compatible with the pinned SDK **1.0.28**. Organization policies and Copilot subscription permissions apply. The extension uses existing Copilot sign-in; no separate model API key or DSH installation is required.
 
-Setup has many steps, so an agent does it with you. Ask your coding agent:
+```sh
+git clone https://github.com/mitkox/copilot-superagent.git
+cd copilot-superagent/vscode
+npm ci --ignore-scripts
+npm run package
+code --install-extension dist/vsc-superagent.vsix
+```
 
-> Read SETUP.md in this repository and set up dsh-superagent with me.
+Use `code-insiders` if your supported editor build is VS Code Insiders. This is a source build and local VSIX installation; the package uses the local publisher identity `superagent-local`. The extension ID remains `superagent-local.vsc-superagent` and the VSIX filename remains `vsc-superagent.vsix` so existing local installations keep their identity.
 
-It asks one short question at a time, shows the full plan once, and then installs and configures everything. [SETUP.md](SETUP.md) is what it follows.
+Open a trusted Git repository, run **Superagent: Apply Local Privacy Settings**, reload the editor, then run **Superagent: Check Copilot Connection** and **Superagent: Start Service**. Select **Superagent** in the Copilot agent picker or use **@superagent** to request work. Configure source scopes and allowed requesters before enabling GitHub or Teams intake.
 
-## Documentation
+Follow the [extension guide](vscode/README.md) for source configuration, permissions, policy, delivery, storage, and recovery. Read the [security boundaries](vscode/SECURITY.md) before enabling unattended execution or deploying in an organization.
 
-Read the numbered documents in order; each builds only on the ones before it.
+## Documentation and development
 
-- [000 Philosophy](docs/000-philosophy.md)
-- [001 Domain model](docs/001-domain.md)
-- [002 Authorization](docs/002-authorization.md)
-- [003 Execution](docs/003-execution.md)
-- [004 Prompts](docs/004-prompts.md)
-- [005 Panel](docs/005-panel.md)
-- [006 Deployment](docs/006-deployment.md): manual setup, configuration, upgrades and troubleshooting
-- [007 Architecture](docs/007-architecture.md)
-- [008 Cookbook](docs/008-cookbook.md): adding a Source
+- [Extension guide](vscode/README.md): installation and daily operation.
+- [Documentation map](docs/README.md): current guides and the original prototype reference.
+- [Contributing](CONTRIBUTING.md): development commands, validation, and pull requests.
+- [Security reporting](SECURITY.md): private vulnerability reports.
 
-## Development
+The VS Code extension is under `vscode/`. It bundles the shared ticket engine from `src/core/` and adapted instructions from `prompts/` and `skills/`. The root package, `SETUP.md`, and numbered documents describe the original DSH/Feishu prototype; its runtime is separate from the extension.
 
-`pnpm check` runs the typecheck, the tests and the build.
+From `vscode/`, `npm run check` runs typechecking, tests, bundling, and package checks. `npm run package` also builds the installable VSIX. GitHub Actions runs the extension dependency audit and packaging checks.
+
+## Project status and attribution
+
+This is research software. Local tests and CI do not establish production readiness or approval for a particular organization, tenant, editor, or operating system. Validate those environments before rollout.
+
+The original prototype is credited to the **DeepSeek Harness Team**. Its source and MIT notice are retained. This adaptation is an independent project, not an official GitHub, Microsoft, or DeepSeek product.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The extension also includes its [MIT license](vscode/LICENSE).

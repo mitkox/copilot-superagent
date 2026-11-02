@@ -350,7 +350,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts && vitest run --config vitest.config.ts",
     "check": "npm run typecheck && npm test && npm run build && node scripts/check-package.mjs",
-    "package": "npm run check && vsce package --no-dependencies --allow-missing-repository --no-rewrite-relative-links --out dist/vsc-superagent.vsix",
+    "package": "npm run check && vsce package --no-dependencies --no-rewrite-relative-links --out dist/vsc-superagent.vsix",
     "audit:production": "npm audit --omit=dev --audit-level=low"
   },
   "devDependencies": {
@@ -369,5 +369,14 @@
   "dependencies": {
     "@github/copilot-sdk": "1.0.28",
     "zod": "4.6.6"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mitkox/copilot-superagent.git",
+    "directory": "vscode"
+  },
+  "homepage": "https://github.com/mitkox/copilot-superagent/blob/main/vscode/README.md",
+  "bugs": {
+    "url": "https://github.com/mitkox/copilot-superagent/issues"
   }
 }

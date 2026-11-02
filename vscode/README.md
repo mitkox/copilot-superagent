@@ -1,4 +1,6 @@
-# Superagent for Copilot
+# Copilot Superagent for VS Code
+
+Source, issues, and contributions: [mitkox/copilot-superagent](https://github.com/mitkox/copilot-superagent). See [Contributing](https://github.com/mitkox/copilot-superagent/blob/main/CONTRIBUTING.md) for development and validation.
 
 Continuous repository agents inside VS Code, using the original dsh-superagent ticket engine, the official GitHub Copilot SDK, GitHub and **Microsoft Teams**.
 
@@ -10,15 +12,17 @@ The service requires a running VS Code workspace extension host. Closing that ho
 
 Requirements: VS Code **1.144+**, Git, Node **22.19+**, and an installed, authenticated **GitHub Copilot CLI** compatible with SDK **1.0.28** (connection validated with CLI **1.0.105**, protocol **3**). The SDK uses existing Copilot sign-in; no OpenAI or DeepSeek key is required. Organization policies and subscription permissions apply.
 
-From this directory:
+Clone the repository and build the extension:
 
 ```sh
+git clone https://github.com/mitkox/copilot-superagent.git
+cd copilot-superagent/vscode
 npm ci --ignore-scripts
 npm run package
 code-insiders --install-extension dist/vsc-superagent.vsix
 ```
 
-Use `code` instead for a supported stable build. The publisher `superagent-local` is a local package identity. SDK JavaScript and adapted original prompts are bundled; the installed CLI runs through stdio. There is no extension HTTP listener or runtime download. Set `superagent.copilot.cliPath` when the executable is not on the extension host's PATH.
+Use `code` instead for a supported stable build. The publisher `superagent-local` is a local package identity; the extension ID `superagent-local.vsc-superagent` and VSIX filename are retained for existing local installations. SDK JavaScript and adapted original prompts are bundled; the installed CLI runs through stdio. There is no extension HTTP listener or runtime download. Set `superagent.copilot.cliPath` when the executable is not on the extension host's PATH.
 
 ## Start work
 
