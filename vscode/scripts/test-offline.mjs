@@ -16,7 +16,7 @@ try {
   await build({ entryPoints: [join(root, 'src/copilot.ts')], bundle: true, platform: 'node', format: 'esm', target: 'node22', outfile: join(directory, 'backend.mjs'),
     plugins: [{ name: 'shared-sdk-identity', setup(api) { api.onResolve({ filter: /^(@github\/copilot-sdk|ws)$/ }, args => ({ path: args.path === '@github/copilot-sdk' ? join(sdk, 'dist/index.js') : require.resolve(args.path), external: true })) } }],
   })
-  for (const [name, mode] of [['actual-backend-http.mjs'], ['actual-backend-websocket.mjs'], ['actual-backend-handoff.mjs', 'abort'], ['actual-backend-handoff.mjs', 'dispose']]) execFileSync(process.execPath, [join(root, 'tests/integration', name), ...(mode ? [mode] : [])], {
+  for (const [name, mode] of [['actual-provider-boundary.mjs'], ['actual-provider-command-resume.mjs'], ['actual-backend-restart.mjs'], ['actual-backend-http.mjs'], ['actual-backend-websocket.mjs'], ['actual-backend-handoff.mjs', 'abort'], ['actual-backend-handoff.mjs', 'dispose']]) execFileSync(process.execPath, [join(root, 'tests/integration', name), ...(mode ? [mode] : [])], {
     stdio: 'inherit', timeout: 60000,
     env: { ...process.env, SUPERAGENT_TEST_SDK: sdk, SUPERAGENT_TEST_COPILOT: cli, SUPERAGENT_TEST_BACKEND: join(directory, 'backend.mjs'), SUPERAGENT_TEST_LAUNCHER: join(directory, 'deny-network') },
   })

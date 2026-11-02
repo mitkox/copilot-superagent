@@ -18,7 +18,7 @@ The service runs while its VS Code workspace extension host is open. An enabled 
 
 ## Build and install
 
-You need VS Code **1.144+**, Git, Node.js **22.19+**, and an installed, authenticated **GitHub Copilot CLI** compatible with the pinned SDK **1.0.28**. Organization policies and Copilot subscription permissions apply. The extension uses existing Copilot sign-in; no separate model API key or DSH installation is required.
+You need VS Code **1.144+**, Git, Node.js **22.19+**, and the reviewed **GitHub Copilot CLI 1.0.105** (protocol **3**) and a **Copilot Business or Enterprise** account, with SDK **1.0.28**. Organization policies and Copilot subscription permissions apply. The extension uses existing Copilot sign-in; no separate model API key or DSH installation is required.
 
 ```sh
 git clone https://github.com/mitkox/copilot-superagent.git
@@ -34,22 +34,24 @@ Open a trusted Git repository, run **Superagent: Apply Local Privacy Settings**,
 
 Follow the [extension guide](vscode/README.md) for source configuration, permissions, policy, delivery, storage, and recovery. Read the [security boundaries](vscode/SECURITY.md) before enabling unattended execution or deploying in an organization.
 
+The extension enforces [Copilot-only inference](vscode/docs/copilot-only.md): custom provider settings and inherited model credentials are excluded, and inference destinations are checked before HTTP or WebSocket connections. Personal-plan endpoints are blocked.
+
 ## Documentation and development
 
 - [Extension guide](vscode/README.md): installation and daily operation.
-- [Documentation map](docs/README.md): current guides and the original prototype reference.
+- [Documentation map](docs/README.md): current guides and validation reference.
 - [Contributing](CONTRIBUTING.md): development commands, validation, and pull requests.
 - [Security reporting](SECURITY.md): private vulnerability reports.
 
-The VS Code extension is under `vscode/`. It bundles the shared ticket engine from `src/core/` and adapted instructions from `prompts/` and `skills/`. The root package, `SETUP.md`, and numbered documents describe the original DSH/Feishu prototype; its runtime is separate from the extension.
+The VS Code extension is under `vscode/`. It bundles the shared ticket engine from `src/core/` and adapted instructions from `prompts/` and `skills/`. The legacy DeepSeek Harness runtime, Feishu integration, web panel, launcher, and their dependencies have been removed. No DeepSeek Harness installation, runtime package, account, API key, or model is required.
 
-From `vscode/`, `npm run check` runs typechecking, tests, bundling, and package checks. `npm run package` also builds the installable VSIX. GitHub Actions runs the extension dependency audit and packaging checks.
+From `vscode/`, `npm run check` runs typechecking, tests, bundling, and package checks. `npm run package` also builds the installable VSIX. The dependency-free root package forwards these commands to `vscode/`; install extension dependencies with `npm run install:extension` from the root. GitHub Actions runs the extension dependency audit and packaging checks.
 
 ## Project status and attribution
 
 This is research software. Local tests and CI do not establish production readiness or approval for a particular organization, tenant, editor, or operating system. Validate those environments before rollout.
 
-The original prototype is credited to the **DeepSeek Harness Team**. Its source and MIT notice are retained. This adaptation is an independent project, not an official GitHub, Microsoft, or DeepSeek product.
+The retained ticket engine and adapted instructions originate from the MIT-licensed dsh-superagent prototype by the **DeepSeek Harness Team**. Their copyright and MIT permission notice are preserved in [LICENSE](LICENSE) and the packaged extension. Runtime independence does not change that source provenance. This adaptation is an independent project, not an official GitHub, Microsoft, or DeepSeek product.
 
 ## License
 

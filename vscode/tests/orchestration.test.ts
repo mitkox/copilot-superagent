@@ -19,6 +19,40 @@ async function eventually(check: () => boolean) {
   const deadline = Date.now() + 3000
   while (!check()) { if (Date.now() > deadline) assert.fail('Automation did not settle'); await new Promise(resolve => setTimeout(resolve, 5)) }
 }
+
+test('upgrading a saved custom-provider model keeps supervision available and requires explicit restart', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'superagent-model-upgrade-'))
+  const runtime = new TicketRuntime(directory)
+  let service: AutomationService | undefined, requests = 0
+  const backend: AgentBackend = {
+    assess: async () => { requests++; return { kind: 'ignore', reason: 'unused' } },
+    run: async () => { requests++ }, steer: async () => {}, handoff() {}, abort: async () => {}, dispose: async () => {},
+  }
+  try {
+    const { DEFAULT_AUTOMATION_SETTINGS } = await import('../src/settings.ts')
+    const value = structuredClone(DEFAULT_AUTOMATION_SETTINGS)
+    value.enabled = true
+    value.execution.model = 'local/deepseek-r1'
+    value.assessment.model = 'custom/assessor'
+    runtime.repositories.mutateAutomation(data => {
+      data.settings = { revision: 1, value }
+      data.history.push({ revision: 1, predecessor: 0, origin: 'panel', at: new Date().toISOString(), value: structuredClone(value) })
+    })
+    service = new AutomationService(runtime, { backend, prepare: async () => directory, poll: async () => [], send: async () => {} })
+    assert.equal(service.settings.revision, 2)
+    assert.equal(service.settings.value.enabled, false)
+    assert.equal(service.settings.value.execution.model, undefined)
+    assert.equal(service.settings.value.assessment.model, undefined)
+    assert.equal(service.snapshot().history[0]!.value.execution.model, 'local/deepseek-r1')
+    assert.match(service.snapshot().health.problems.find(row => row.component === 'copilot-policy')!.error, /Review.*Copilot/)
+    service.start(); await service.pollNow()
+    assert.equal(requests, 0)
+    assert.equal(service.snapshot().health.problems.some(row => row.component === 'copilot-policy'), true)
+    assert.throws(() => service!.restoreSettings(1, 2), /Copilot-only/)
+    service.saveSettings({ ...service.settings.value, execution: { ...service.settings.value.execution, model: 'gpt-5' } }, 2)
+    assert.equal(service.snapshot().health.problems.some(row => row.component === 'copilot-policy'), false)
+  } finally { await service?.dispose(); runtime.dispose(); rmSync(directory, { recursive: true, force: true }) }
+})
 function fixture(run?: (request: AgentRun) => Promise<void>, extra: { send?: (message: OutboundMessage) => Promise<void>; prepare?: () => Promise<string>; resolveThread?: (family: 'github' | 'teams', id: string, signal: AbortSignal) => Promise<ThreadRef>; sourceNamespaces?: () => Partial<Record<'github' | 'teams', string[]>> } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'superagent-automation-'))
   const runtime = new TicketRuntime(directory)

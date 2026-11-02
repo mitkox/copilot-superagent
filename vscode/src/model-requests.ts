@@ -1,5 +1,6 @@
 import { CopilotRequestHandler, CopilotWebSocketHandler, CopilotWebSocketCloseStatus, type CopilotRequestContext } from '@github/copilot-sdk'
 import WebSocket from 'ws'
+import { assertCopilotEndpoint, assertCopilotModel } from './copilot-policy.ts'
 
 export interface ModelRequestOwner {
   signal: AbortSignal
@@ -39,9 +40,10 @@ export function bindInstructions(body: Record<string, unknown>, nonce: string, c
 
 /** SDK transforms are cached. Bind current instructions at the actual HTTP or WebSocket model request. */
 export class WorkerModelRequests extends CopilotRequestHandler {
-  constructor(private readonly resolve: (context: CopilotRequestContext) => ModelRequestOwner) { super() }
+  constructor(private readonly resolve: (context: CopilotRequestContext) => ModelRequestOwner, private readonly githubHost = 'github.com') { super() }
 
   rewrite(body: Record<string, unknown>, context: CopilotRequestContext): ModelRequestOwner {
+    if (body.model !== undefined) assertCopilotModel(body.model)
     const owner = this.resolve(context)
     owner.assertCurrent(); owner.signal.throwIfAborted(); context.signal.throwIfAborted()
     if (owner.instructions) {
@@ -55,14 +57,18 @@ export class WorkerModelRequests extends CopilotRequestHandler {
   }
 
   protected override async sendRequest(request: Request, context: CopilotRequestContext): Promise<Response> {
+    assertCopilotEndpoint(request.url, 'http', this.githubHost)
+    assertCopilotEndpoint(context.url, 'http', this.githubHost)
+    if (new URL(context.url).href !== request.url) throw new Error('Copilot-only: inference destination mismatch')
     const body: unknown = await request.clone().json()
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Invalid model request')
     const owner = this.rewrite(body as Record<string, unknown>, context)
     const headers = new Headers(request.headers); headers.delete('content-length')
-    return super.sendRequest(new Request(request, { headers, body: JSON.stringify(body), signal: AbortSignal.any([request.signal, context.signal, owner.signal]) }), context)
+    return fetch(new Request(request, { headers, body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.any([request.signal, context.signal, owner.signal]) }))
   }
 
   protected override async openWebSocket(context: CopilotRequestContext): Promise<CopilotWebSocketHandler> {
+    assertCopilotEndpoint(context.url, 'websocket', this.githubHost)
     const owner = this.resolve(context)
     owner.assertCurrent(); owner.signal.throwIfAborted()
     return await new AuthenticatedModelSocket(context, (body, current) => this.rewrite(body, current), owner.signal).open()

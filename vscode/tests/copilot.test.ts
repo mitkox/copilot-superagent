@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
@@ -103,6 +103,76 @@ test('stdio uses the installed CLI and suppresses inherited telemetry exporters'
   assert.equal(config.env?.OTEL_EXPORTER_OTLP_ENDPOINT, undefined)
   assert.deepEqual(await f.backend.check(), { authenticated: true, cliVersion: '1.0.105', protocolVersion: 3, login: 'test-user' })
   assert.equal(f.client.created.length, 0)
+})
+
+test('ambient custom-provider, model, injection and alternate-profile configuration never reaches the CLI', async t => {
+  const unsafe = {
+    COPILOT_PROVIDER_BASE_URL: 'https://custom.example/v1', COPILOT_PROVIDER_API_KEY: 'fixture-secret',
+    COPILOT_PROVIDERS_CONFIG: '/untrusted/providers.json', COPILOT_HOME: '/untrusted/profile',
+    COPILOT_MODEL: 'custom/model', COPILOT_OFFLINE: 'true', COPILOT_CLI_PATH: '/untrusted/copilot',
+    COPILOT_API_URL: 'https://custom.example', COPILOT_GH_HOST: 'custom.example',
+    OPENAI_API_KEY: 'fixture-secret', DEEPSEEK_API_KEY: 'fixture-secret',
+    NODE_OPTIONS: '--import=/untrusted/loader.js', LD_PRELOAD: '/untrusted/library.so',
+  }
+  for (const [name, value] of Object.entries(unsafe)) { const previous = process.env[name]; process.env[name] = value; t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous }) }
+  const f = fixture(t)
+  const env = f.clientOptions().env!
+  for (const name of Object.keys(unsafe).filter(name => !['COPILOT_PROVIDERS_CONFIG', 'COPILOT_GH_HOST'].includes(name))) assert.equal(env[name], undefined, name)
+  assert.equal(env.COPILOT_GH_HOST, 'github.com')
+  assert.notEqual(env.COPILOT_PROVIDERS_CONFIG, unsafe.COPILOT_PROVIDERS_CONFIG)
+  const registry = env.COPILOT_PROVIDERS_CONFIG!
+  assert.deepEqual(JSON.parse(readFileSync(registry, 'utf8')), { providers: [], models: [] })
+  await f.backend.run(f.input)
+  const config = f.client.created[0]!.config
+  assert.equal(config.enableConfigDiscovery, false)
+  assert.equal(config.enableFileHooks, false)
+  assert.equal(config.enableSkills, false)
+  assert.deepEqual(config.pluginDirectories, [])
+  assert.deepEqual(config.customAgents, [])
+  assert.deepEqual(config.mcpServers, {})
+  assert.deepEqual(config.providers, [])
+  assert.deepEqual(config.models, [])
+  await f.backend.dispose()
+  assert.equal(existsSync(registry), false)
+})
+
+test('provider-qualified models cannot create, resume or assess a session', async t => {
+  const f = fixture(t)
+  await assert.rejects(f.backend.run({ ...f.input, model: 'local/deepseek-r1' }), /Copilot-only/)
+  await assert.rejects(f.backend.assess('Facts', new AbortController().signal, 'local/deepseek-r1'), /Copilot-only/)
+  assert.equal(f.client.created.length, 0)
+  assert.equal(f.client.resumed.length, 0)
+  await f.backend.run(f.input)
+  await assert.rejects(f.backend.run({ ...f.input, model: 'local/deepseek-r1' }), /Copilot-only/)
+  assert.equal(f.client.resumed.length, 0)
+})
+
+test('unreviewed CLI versions and arbitrary authentication hosts fail closed', async t => {
+  assert.throws(() => fixture(t, { githubHost: 'custom.example' }), /Copilot-only/)
+  const f = fixture(t)
+  f.client.getStatus = async () => ({ version: '1.0.106', protocolVersion: 3 })
+  await assert.rejects(f.backend.run(f.input), /requires reviewed Copilot CLI/)
+  assert.equal(f.client.created.length, 0)
+  assert.equal(f.client.resumed.length, 0)
+})
+
+test('cancelling one ticket does not poison shared CLI startup for another caller', async t => {
+  const f = fixture(t), controller = new AbortController()
+  let release!: () => void, started!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const starting = new Promise<void>(resolve => { started = resolve })
+  f.client.start = async () => { started(); await gate }
+  const ticket = f.backend.run({ ...f.input, signal: controller.signal })
+  const rejected = assert.rejects(ticket, /abort/i)
+  await starting
+  const independent = f.backend.check()
+  controller.abort()
+  await rejected
+  release()
+  assert.equal((await independent).authenticated, true)
+  await f.backend.run({ ...f.input, ticketId: 'ticket-b', sessionId: 'stable-ticket-b' })
+  assert.equal(f.client.created.length, 1)
+  assert.equal(f.client.created[0]!.sessionId, 'stable-ticket-b')
 })
 
 test('a stable ticket creates once then resumes in its worktree with current instructions and model', async t => {
