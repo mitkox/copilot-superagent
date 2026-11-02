@@ -8,6 +8,7 @@ import { CopilotBackend, type CopilotBackendOptions, type CopilotClientConnectio
 import type { AgentEvent, AgentRun } from '../src/agent-backend.ts'
 
 class FakeSession implements CopilotSessionConnection {
+  rpc?: CopilotSessionConnection['rpc']
   abortCount = 0
   disconnectCount = 0
   sends = 0
@@ -77,6 +78,21 @@ function fixture(t: TestContext, options: Partial<CopilotBackendOptions> = {}) {
   return { backend, client, input, events, clientOptions: () => clientOptions! }
 }
 
+async function parkedShell(t: TestContext) {
+  const f = fixture(t)
+  let running = true, cancellations = 0
+  const rpc = {
+    tasks: {
+      list: async () => ({ tasks: [{ id: 'retained-shell', type: 'shell', status: running ? 'running' : 'cancelled' }] }),
+      cancel: async () => { running = false; cancellations++ },
+    },
+    metadata: { isProcessing: async () => ({ processing: false }) },
+  } as unknown as CopilotSessionConnection['rpc']
+  f.client.send = async (_config, session) => { session.rpc = rpc; f.backend.handoff(f.input.ticketId) }
+  await f.backend.run(f.input)
+  return { ...f, session: f.client.created[0]!, running: () => running, cancellations: () => cancellations }
+}
+
 test('stdio uses the installed CLI and suppresses inherited telemetry exporters', async t => {
   const f = fixture(t)
   const config = f.clientOptions()
@@ -132,6 +148,85 @@ test('provider lookup and resume errors never create replacement conversations',
   assert.equal(f.client.created.length, 0)
 })
 
+for (const failure of ['lookup', 'resume'] as const) test(`a failed ${failure} retains the parked shell lease for a later stop`, async t => {
+  const f = await parkedShell(t)
+  f.client[failure === 'lookup' ? 'lookupError' : 'resumeError'] = new Error('Fixture attachment failure')
+  await assert.rejects(f.backend.run(f.input), /Fixture attachment failure/)
+  assert.equal(f.running(), true)
+  assert.equal(f.session.disconnectCount, 0)
+  await f.backend.abort(f.input.ticketId)
+  assert.equal(f.running(), false)
+  assert.equal(f.cancellations(), 1)
+  assert.equal(f.session.abortCount, 1)
+})
+
+test('a successful continuation transfers the parked lease without detaching the resumed session', async t => {
+  const f = await parkedShell(t)
+  f.client.sessions = [] // The native session list can omit an attached in-memory session.
+  await f.backend.run(f.input)
+  assert.equal(f.client.resumed.length, 1)
+  assert.equal(f.session.disconnectCount, 0)
+  assert.equal(f.running(), true)
+  await f.backend.abort(f.input.ticketId)
+  assert.equal(f.running(), false)
+  assert.equal(f.cancellations(), 1)
+  assert.equal(f.client.resumed[0]!.abortCount, 1)
+})
+
+test('a parked lease cannot be transferred to a different stable session', async t => {
+  const f = await parkedShell(t)
+  await assert.rejects(f.backend.run({ ...f.input, sessionId: 'another-session' }), /Parked Copilot session does not match/)
+  assert.equal(f.running(), true)
+  assert.equal(f.client.resumed.length, 0)
+  await f.backend.abort(f.input.ticketId)
+  assert.equal(f.running(), false)
+})
+
+test('a continuation reserves its ticket before any asynchronous lease transition', async t => {
+  const f = await parkedShell(t)
+  let release!: () => void, lookedUp!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const lookup = new Promise<void>(resolve => { lookedUp = resolve })
+  f.client.listSessions = async () => { lookedUp(); await gate; return f.client.sessions }
+  const first = f.backend.run(f.input)
+  try {
+    await assert.rejects(f.backend.run(f.input), /already owns/)
+    await lookup
+  } finally { release(); await first }
+  assert.equal(f.client.resumed.length, 1)
+})
+
+test('a continuation stays fenced while cancellation of the parked shell is pending', async t => {
+  const f = await parkedShell(t)
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  f.session.rpc!.tasks.cancel = async () => { await gate; return {} as never }
+  const stopping = f.backend.abort(f.input.ticketId)
+  try { await assert.rejects(f.backend.run(f.input), /already owns/) }
+  finally { release(); await stopping }
+})
+
+for (const control of ['abort', 'signal', 'dispose'] as const) test(`${control} during continuation lookup cancels the parked shell and fences late attachment`, async t => {
+  const f = await parkedShell(t)
+  let release!: () => void, lookedUp!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const lookup = new Promise<void>(resolve => { lookedUp = resolve })
+  f.client.listSessions = async () => { lookedUp(); await gate; return f.client.sessions }
+  const controller = new AbortController()
+  const continued = f.backend.run({ ...f.input, signal: controller.signal })
+  const rejected = assert.rejects(continued, /abort/i)
+  await lookup
+  if (control === 'signal') controller.abort()
+  else if (control === 'abort') await f.backend.abort(f.input.ticketId)
+  else await f.backend.dispose()
+  release()
+  await rejected
+  assert.equal(f.running(), false)
+  assert.equal(f.cancellations(), 1)
+  assert.equal(f.client.resumed.length, 0)
+  assert.equal(f.client.created.length, 1)
+})
+
 test('read-only lookups retry transient failures within a bound', async t => {
   const f = fixture(t)
   f.client.transientLookups = 2
@@ -184,6 +279,35 @@ test('sent turn failures abort once without replaying custom external writes', a
   await assert.rejects(f.backend.run(f.input), /after external write/)
   assert.equal(writes, 1)
   assert.equal(f.client.created[0]!.abortCount, 1)
+})
+
+for (const fail of [false, true]) test(`native worker submission waits for its own consumed message and ${fail ? 'propagates a correlated failure' : 'settles without an SDK wait timer'}`, async t => {
+  const f = fixture(t, { pollMs: 1 })
+  let submitted!: () => void
+  const submission = new Promise<void>(resolve => { submitted = resolve })
+  const create = f.client.createSession.bind(f.client)
+  f.client.createSession = async config => {
+    const session = await create(config)
+    Object.assign(session, {
+      send: async () => { submitted(); return 'current-message' },
+      rpc: { tasks: { list: async () => ({ tasks: [] }) }, metadata: { isProcessing: async () => ({ processing: false }) } },
+    })
+    return session
+  }
+  let settled = false
+  const run = f.backend.run(f.input).finally(() => { settled = true })
+  const outcome = fail ? assert.rejects(run, /Current request failed/) : run
+  await submission
+  const config = f.client.created[0]!.config
+  config.onEvent!({ type: 'user.message', id: 'unrelated', parentId: null, timestamp: new Date().toISOString(), data: { content: 'Other input', messageId: 'other-message' } })
+  config.onEvent!({ type: 'session.error', id: 'unrelated-error', parentId: null, timestamp: new Date().toISOString(), data: { message: 'Previous request failed', errorType: 'query', originatingMessageId: 'other-message' } })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(settled, false)
+  if (fail) config.onEvent!({ type: 'session.error', id: 'current-error', parentId: null, timestamp: new Date().toISOString(), data: { message: 'Current request failed', errorType: 'query', originatingMessageId: 'current-message' } })
+  else config.onEvent!({ type: 'user.message', id: 'current', parentId: null, timestamp: new Date().toISOString(), data: { content: f.input.prompt, messageId: 'current-message' } })
+  await outcome
+  assert.equal(f.client.created[0]!.sends, 0, 'Native workers do not create SDK sendAndWait timers')
+  assert.equal(f.client.created[0]!.abortCount, fail ? 1 : 0)
 })
 
 test('host permission denials and managed interactive one-time approval are enforced', async t => {

@@ -57,6 +57,7 @@ interface ActiveRun {
   attached?(): void
   handedOff?: boolean
   consumed?: Set<string>
+  failures?: Map<string | undefined, Error>
   deliveries?: Map<string, { promise: Promise<void>; messageId?: string; pending: boolean; consumed(): void }>
 }
 
@@ -138,15 +139,12 @@ export class CopilotBackend implements AgentBackend {
     input.signal.throwIfAborted()
     if (this.active.has(input.ticketId) || this.pendingSetup.has(input.sessionId)) throw new Error('A Copilot run already owns this ticket')
     const parked = this.parked.get(input.ticketId)
-    if (parked?.session) await this.cleanup(parked.session, false)
-    this.parked.delete(input.ticketId)
-    const state: ActiveRun = { controller: new AbortController(), active: true, input, nonce: randomUUID(), consumed: new Set(), deliveries: new Map() }
+    if (parked?.aborting) throw new Error('A Copilot run already owns this ticket')
+    const state: ActiveRun = { controller: new AbortController(), active: true, input, nonce: randomUUID(), consumed: new Set(), failures: new Map(), deliveries: new Map() }
     state.ready = new Promise(resolve => { state.attached = resolve })
     const signal = AbortSignal.any([input.signal, state.controller.signal])
-    this.modelOwners.set(input.sessionId, { state, authorize: () => { signal.throwIfAborted(); input.assertAuthorized?.() } })
-    this.parked.delete(input.ticketId)
     this.active.set(input.ticketId, state)
-    const cancel = () => { if (!state.handedOff) void this.abortState(state).catch(() => {}) }
+    const cancel = () => { if (!state.handedOff) void this.abort(input.ticketId).catch(() => {}) }
     signal.addEventListener('abort', cancel, { once: true })
     try {
       if (!isAbsolute(input.directory)) throw new Error('Copilot ticket worktree must be an absolute directory')
@@ -155,7 +153,9 @@ export class CopilotBackend implements AgentBackend {
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,199}$/.test(input.sessionId)) throw new Error('Invalid stable Copilot session ID')
       const owner = this.sessionOwners.get(input.sessionId)
       if (owner && (owner.ticketId !== input.ticketId || owner.directory !== directory)) throw new Error('Copilot session belongs to another ticket or worktree')
+      if (parked?.session && parked.session.sessionId !== input.sessionId) throw new Error('Parked Copilot session does not match the ticket session')
       this.sessionOwners.set(input.sessionId, { ticketId: input.ticketId, directory })
+      this.modelOwners.set(input.sessionId, { state, authorize: () => { signal.throwIfAborted(); input.assertAuthorized?.() } })
       await this.start(signal)
       signal.throwIfAborted()
       // Lookup is read-only and retryable. A provider error must never become a fresh session.
@@ -174,6 +174,7 @@ export class CopilotBackend implements AgentBackend {
         enableSessionStore: false,
         customAgentsLocalOnly: true,
         onEvent: event => {
+          if (event.type === 'session.error' && !event.agentId) state.failures!.set(event.data.originatingMessageId, new Error(event.data.message))
           if (event.type === 'user.message' && !event.agentId) {
             const message = event.data.messageId
             if (message) {
@@ -205,15 +206,20 @@ export class CopilotBackend implements AgentBackend {
         },
       }
       signal.throwIfAborted()
-      state.session = await this.attach(existing
+      state.session = await this.attach(existing || parked?.session
         ? this.client.resumeSession(input.sessionId, { ...config, continuePendingWork: false, allowTranscriptRecovery: false })
         : this.client.createSession({ ...config, sessionId: input.sessionId, name: `Superagent ${input.ticketId}`.slice(0, 100) }), state, input.sessionId, signal)
       state.attached?.()
       signal.throwIfAborted()
       if (state.session.sessionId !== input.sessionId) throw new Error('Copilot returned a different session identity')
+      // SDK resume replaces the registered session. Detaching the old object would detach this lease too.
+      if (parked && this.parked.get(input.ticketId) === parked) this.parked.delete(input.ticketId)
       // A sent turn is never replayed here: external writes may already have happened.
-      await withAbort(state.session.sendAndWait({ prompt: input.prompt }, maximumWaitMs), signal)
-      await this.quiet(state, signal)
+      // Native sendAndWait owns an uncancellable timer; a handoff must leave no abandoned waiter.
+      const messageId = state.session.send && state.session.rpc
+        ? await this.rpc(state.session.send({ prompt: input.prompt }), signal)
+        : (await withAbort(state.session.sendAndWait({ prompt: input.prompt }, maximumWaitMs), signal), undefined)
+      await this.quiet(state, signal, messageId)
       signal.throwIfAborted()
     } catch (error) {
       if (!state.handedOff) { await this.abortState(state).catch(() => {}); throw error }
@@ -222,9 +228,12 @@ export class CopilotBackend implements AgentBackend {
       signal.removeEventListener('abort', cancel)
       try {
         if (state.handedOff) {
+          if (state.session) this.parked.set(input.ticketId, state)
           const retained = await this.cancelTasks(state, true)
-          if (state.handedOff && !this.disposed && retained) this.parked.set(input.ticketId, state)
-          else if (state.session) await this.cleanup(state.session, false)
+          if (!state.handedOff || this.disposed || !retained) {
+            if (this.parked.get(input.ticketId) === state) this.parked.delete(input.ticketId)
+            if (state.session) await this.cleanup(state.session, false)
+          }
         }
         else if (state.session) await this.cleanup(state.session, false)
       } finally {
@@ -344,8 +353,11 @@ export class CopilotBackend implements AgentBackend {
   }
 
   async abort(ticketId: string): Promise<void> {
-    const state = this.active.get(ticketId) ?? this.parked.get(ticketId)
-    if (state) { state.handedOff = false; state.controller.abort(); await this.abortState(state); this.parked.delete(ticketId) }
+    const parked = this.parked.get(ticketId)
+    const states = [...new Set([this.active.get(ticketId), parked].filter((state): state is ActiveRun => !!state))]
+    for (const state of states) { state.handedOff = false; state.active = false; state.controller.abort() }
+    await Promise.all(states.map(state => this.abortState(state)))
+    if (this.parked.get(ticketId) === parked) this.parked.delete(ticketId)
   }
 
   async dispose(): Promise<void> {
@@ -416,14 +428,16 @@ export class CopilotBackend implements AgentBackend {
     await this.rpc(session.disconnect(), undefined, true)
   }
 
-  private async quiet(state: ActiveRun, signal: AbortSignal): Promise<void> {
+  private async quiet(state: ActiveRun, signal: AbortSignal, messageId?: string): Promise<void> {
     if (!state.session?.rpc) return
     let backgroundSince: number | undefined, quietSamples = 0
     for (;;) {
       signal.throwIfAborted(); state.input?.assertAuthorized?.()
+      const failure = state.failures?.get(messageId) ?? state.failures?.get(undefined)
+      if (failure) throw failure
       const [root, snapshot] = await this.rpc(Promise.all([state.session.rpc.metadata.isProcessing(), state.session.rpc.tasks.list()]), signal)
       const pending = snapshot.tasks.some(task => task.status === 'running')
-      if (!root.processing && !pending && ![...state.deliveries!.values()].some(delivery => delivery.pending)) {
+      if ((!messageId || state.consumed!.has(messageId)) && !root.processing && !pending && ![...state.deliveries!.values()].some(delivery => delivery.pending)) {
         if (++quietSamples >= 2) return
       } else quietSamples = 0
       if (!root.processing && pending) backgroundSince ??= Date.now()

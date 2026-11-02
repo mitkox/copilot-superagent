@@ -182,7 +182,7 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
               const provider = trigger.meta.provider as SourceContext | undefined
               return provider?.provider === 'teams' && trigger.threads.some(ref => activeThreads.has(threadKey(ref))) ? [String(sourceSubscription(provider))] : []
             }))]
-            const batch = await pollTeamsBatch({ ...base, ...scope, receiveUnlisted: Object.values(service!.settings.value.sources.teams.admission ?? {}).some(mode => mode !== 'ignore'), since, subscribedThreads }, previous?.cursor, signal)
+            const batch = await pollTeamsBatch({ ...base, ...scope, directChatIds: base.directChatIds?.filter(chat => scope.chatIds.includes(chat)), receiveUnlisted: Object.values(service!.settings.value.sources.teams.admission ?? {}).some(mode => mode !== 'ignore'), since, subscribedThreads }, previous?.cursor, signal)
             commit(key, batch.items.map(sourceTrigger), { since: batch.next ? since : started, started, ...(batch.next ? { cursor: batch.next } : {}) })
           } catch (error) {
             signal.throwIfAborted()

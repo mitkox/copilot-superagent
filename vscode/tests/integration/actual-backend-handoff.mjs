@@ -54,7 +54,7 @@ async function exercise(wireApi) {
     });
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
     const origin = `http://127.0.0.1:${server.address().port}`;
-    let realClient, session, promptRevision = 1, initialConsumed = 0, accepted = 0, consumed = 0, steerError;
+    let realClient, session, lookupError, resumeError, promptRevision = 1, initialConsumed = 0, accepted = 0, consumed = 0, steerError;
     let runSettled = false, childRunning = false, rootIdleWithChild = 0;
     const applied = [];
     const safe = config => ({ ...config,
@@ -81,10 +81,10 @@ async function exercise(wireApi) {
                 mode: 'empty', baseDirectory: join(directory, 'data'), workingDirectory: workspace, useLoggedInUser: false,
                 env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, XDG_DATA_HOME: join(directory, 'data'), XDG_CONFIG_HOME: join(directory, 'config'), COPILOT_DISABLE_KEYTAR: '1', COPILOT_GITHUB_TELEMETRY_DISABLED: 'true', COPILOT_OTEL_ENABLED: 'false', OTEL_SDK_DISABLED: 'true' },
             });
-            return { start: () => realClient.start(), stop: () => realClient.stop(), forceStop: () => realClient.forceStop(), listSessions: () => realClient.listSessions(),
+            return { start: () => realClient.start(), stop: () => realClient.stop(), forceStop: () => realClient.forceStop(), listSessions: () => lookupError ? Promise.reject(lookupError) : realClient.listSessions(),
                 deleteSession: id => realClient.deleteSession(id), getAuthStatus: () => realClient.getAuthStatus(), getStatus: () => realClient.getStatus(),
                 createSession: async (config) => { session = await realClient.createSession(safe(config)); return session; },
-                resumeSession: async (id, config) => { session = await realClient.resumeSession(id, safe(config)); return session; },
+                resumeSession: async (id, config) => { if (resumeError) throw resumeError; session = await realClient.resumeSession(id, safe(config)); return session; },
             };
         },
     });
@@ -109,7 +109,8 @@ async function exercise(wireApi) {
         assert.equal(shellRows.length, 2, 'Both native attached shells tracked');
         assert.ok(shellRows.every(row => row.attachmentMode === 'attached'));
         assert.equal(shellRows.find(row => row.id.includes('fixture-long') || row.command?.includes(longMarker))?.status, 'running', 'Long shell survives operator handoff');
-        assert.equal(parked.tasks.find(row => row.id === task.agentId)?.status, 'cancelled', 'Native child cancelled at handoff');
+        const childStatus = parked.tasks.find(row => row.id === task.agentId)?.status;
+        assert.equal(childStatus, 'cancelled', 'Native child cancelled at handoff');
         const forwardedAtPark = received.length;
         const until = Date.now() + 3000;
         while (Date.now() < until) {
@@ -125,6 +126,20 @@ async function exercise(wireApi) {
         await new Promise(resolve => setTimeout(resolve, 150));
         assert.equal(received.length, forwardedAtPark, 'Background completion cannot forward a model request after handoff');
         const afterCompletion = await bounded(session.rpc.tasks.list(), 'post completion tasks');
+        const originalSession = session;
+        lookupError = new Error('Fixture continuation lookup failure');
+        await assert.rejects(bounded(backend.run(input), 'failed continuation lookup'), /Fixture continuation lookup failure/);
+        lookupError = undefined;
+        resumeError = new Error('Fixture continuation resume failure');
+        await assert.rejects(bounded(backend.run(input), 'failed continuation resume'), /Fixture continuation resume failure/);
+        resumeError = undefined;
+        assert.equal(session, originalSession, 'Failed continuations preserve the parked connection');
+        const afterFailures = await bounded(session.rpc.tasks.list(), 'retained tasks after attachment failures');
+        assert.equal(afterFailures.tasks.find(row => row.command?.includes(longMarker))?.status, 'running', 'Failed continuations retain the attached shell');
+        await bounded(backend.run({ ...input, prompt: 'Resume the retained native shells and hand control back to the operator' }), 'successful native continuation', 10000);
+        assert.notEqual(session, originalSession, 'Continuation attaches a replacement SDK session');
+        const afterResume = await bounded(session.rpc.tasks.list(), 'resumed retained tasks');
+        assert.equal(afterResume.tasks.find(row => row.command?.includes(longMarker))?.status, 'running', 'Successful continuation retains the original attached shell');
         let afterAbort, afterDispose;
         if (stopMode === 'abort') {
             await bounded(backend.abort('fixture-ticket'), 'explicit operator stop', 3000);
@@ -153,10 +168,10 @@ async function exercise(wireApi) {
             afterDispose = { pid, alive };
         }
         await assert.rejects(readFile(longMarker), { code: 'ENOENT' });
-        const evidence = { stopMode, beforeHandoff, parked, afterCompletion, afterAbort, afterDispose, forwardedAtPark, forwardedAfterCompletion: received.length, handoffAt,
+        const evidence = { stopMode, beforeHandoff, parked, afterCompletion, afterFailures, afterResume, afterAbort, afterDispose, forwardedAtPark, forwardedAfterCompletion: received.length, handoffAt,
             events: events.filter(event => ['system.notification', 'session.error', 'assistant.idle', 'session.idle', 'session.background_tasks_changed'].includes(event.type)) };
         await writeFile(join(directory, 'handoff-evidence.json'), JSON.stringify(evidence, null, 2));
-        return { passed: true, stopMode, shellCount: shellRows.length, childStatus: parked.tasks.find(row => row.id === task.agentId)?.status,
+        return { passed: true, stopMode, shellCount: shellRows.length, childStatus,
             forwardedAtPark, forwardedAfterCompletion: received.length, directory };
     }
     finally {
