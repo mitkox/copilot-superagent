@@ -1,13 +1,15 @@
 import { buildSync } from "esbuild";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 
+import { resolveGit } from "../src/worktree.ts";
+const gitExecutable = resolveGit("git");
 const requireModule = createRequire(import.meta.url);
 const code = buildSync({
   entryPoints: ["src/extension.ts"],
@@ -20,11 +22,11 @@ const code = buildSync({
 }).outputFiles[0]!.text;
 
 function fixture() {
-  const temporary = mkdtempSync(join(tmpdir(), "superagent-extension-"));
+  const temporary = realpathSync(mkdtempSync(join(tmpdir(), "superagent-extension-")));
   const root = join(temporary, "repo");
   mkdirSync(root);
   const git = (...args: string[]) =>
-    execFileSync("/usr/bin/git", args, { cwd: root, encoding: "utf8" });
+    execFileSync(gitExecutable, args, { cwd: root, encoding: "utf8" });
   git("init", "-q");
   git("config", "user.name", "Test");
   git("config", "user.email", "test@example.invalid");
@@ -83,7 +85,7 @@ function fixture() {
         isActive: false,
         activate: async () => {
           gitActivations++;
-          return { getAPI: () => ({ git: { path: "/usr/bin/git" } }) };
+          return { getAPI: () => ({ git: { path: gitExecutable } }) };
         },
       }),
     },
@@ -144,7 +146,7 @@ function fixture() {
         return { accessToken: "private-graph-token" };
       },
     },
-    Uri: { file: (path: string) => ({ fsPath: path }) },
+    Uri: { file: (path: string) => ({ fsPath: path }), joinPath: (uri: { fsPath: string }, ...parts: string[]) => ({ fsPath: join(uri.fsPath, ...parts) }) },
     ConfigurationTarget: { Global: 1 },
     EventEmitter: class {
       event = () => disposable;
@@ -159,7 +161,12 @@ function fixture() {
       constructor(public value: string) {}
     },
   };
+  const extensionRoot = join(temporary, "extension");
+  mkdirSync(join(extensionRoot, "dist/prompts"), { recursive: true });
+  writeFileSync(join(extensionRoot, "dist/prompts/worker.md"), "Test worker");
+  writeFileSync(join(extensionRoot, "dist/prompts/defaults.json"), "{}");
   const context: any = {
+    extensionUri: { fsPath: extensionRoot },
     subscriptions: [],
     globalStorageUri: { fsPath: join(temporary, "storage") },
     globalState: {
@@ -823,4 +830,25 @@ test("GitHub source changes during SecretStorage retrieval and credential remova
   } finally {
     f.close();
   }
+});
+
+
+test('model routing requires exact native consent and cancelled consent cannot grant a mandate', async () => {
+  const f = fixture();
+  try {
+    f.approve(false);
+    const before = f.promptCount;
+    await f.invoke('superagent_route', { request: 'Run the quoted request' });
+    assert.equal(f.promptCount, before + 1);
+    const status = await f.invoke('superagent_route', { status: true });
+    assert.equal(JSON.parse(status.content[0]!.value).tickets.length, 0);
+    f.approve(true);
+    const token = { isCancellationRequested: false };
+    f.onConfirm(() => { token.isCancellationRequested = true; });
+    await assert.rejects(() => f.invoke('superagent_route', { request: 'Repair only file A' }, token), /Cancelled/);
+    assert.equal(JSON.parse((await f.invoke('superagent_route', { status: true })).content[0]!.value).tickets.length, 0);
+    f.onConfirm(() => {});
+    const created = await f.invoke('superagent_route', { request: 'Repair only file A' });
+    assert.ok(JSON.parse(created.content[0]!.value).ticketId);
+  } finally { f.close(); }
 });

@@ -5,6 +5,7 @@ export type SourceFamily = 'github' | 'teams'
 export interface AutomationRule { id: string; name: string; instruction: string; enabled: boolean }
 export interface SourceAdmission {
   enabled: boolean
+  namespaces?: string[]
   allowedActors: string[]
   allowedBots: string[]
   allowUnaddressed: boolean
@@ -61,7 +62,7 @@ export function validateSettings(value: unknown, current: AutomationSettings = D
       for (const family of ['github', 'teams'] as const) if (part[family] !== undefined) {
         const source = part[family]
         if (!object(source)) throw new Error('Invalid source settings')
-        keys(source, ['enabled', 'allowedActors', 'allowedBots', 'allowUnaddressed', 'admission'], 'source')
+        keys(source, ['enabled', 'namespaces', 'allowedActors', 'allowedBots', 'allowUnaddressed', 'admission'], 'source')
         Object.assign(result.sources[family], source)
       }
     } else Object.assign(result, { [key]: part })
@@ -69,7 +70,7 @@ export function validateSettings(value: unknown, current: AutomationSettings = D
   if (typeof result.enabled !== 'boolean' || !['off', 'observe', 'auto'].includes(result.acceptMode)) throw new Error('Invalid automation mode')
   for (const source of Object.values(result.sources)) {
     if (typeof source.enabled !== 'boolean' || typeof source.allowUnaddressed !== 'boolean') throw new Error('Invalid source switch')
-    for (const list of [source.allowedActors, source.allowedBots]) {
+    for (const list of [source.allowedActors, source.allowedBots, ...(source.namespaces !== undefined ? [source.namespaces] : [])]) {
       if (!Array.isArray(list) || list.length > 1000) throw new Error('Invalid source allowed list')
       for (const actor of list) content(actor, 'source identity', 1000, false)
     }
@@ -124,20 +125,21 @@ export const automationPolicyVersion = (settings: AutomationSettings): string =>
 const has = (list: string[], id: string) => list.some(value => value.toLowerCase() === id.toLowerCase())
 const local = (source: string, id: string) => source === 'vscode' && id === 'local-operator'
 
-export function automationScope(settings: AutomationSettings): SourceScope {
+export function automationScope(settings: AutomationSettings, namespaces?: Partial<Record<SourceFamily, string[]>>): SourceScope {
   return { scope(input) {
     if (input.source === 'vscode') return { listened: true, observed: false }
     const family = sourceFamily(input.source), source = family && settings.sources[family]
-    return source?.enabled ? { listened: true, observed: source.allowUnaddressed } : { listened: false, reason: 'sourceDisabled' }
+    return source?.enabled && (!source.namespaces || source.namespaces.includes(input.source)) && (!namespaces || !!family && !!namespaces[family]?.includes(input.source)) ? { listened: true, observed: source.allowUnaddressed } : { listened: false, reason: 'sourceDisabled' }
   } }
 }
 
-export function automationPolicy(settings: AutomationSettings, paused = false): Policy {
+export function automationPolicy(settings: AutomationSettings, paused = false, namespaces?: Partial<Record<SourceFamily, string[]>>): Policy {
+  const listened = (source: string) => automationScope(settings, namespaces).scope({ source, meta: {} }).listened
   const inferred = (rules: readonly string[]) => settings.acceptMode === 'auto' && rules.length > 0 && rules.every(id => settings.rules.some(rule => rule.enabled && rule.id === id))
   const gate = (trigger: Trigger, participating: boolean): GateResult => {
     if (local(trigger.actor.source, trigger.actor.id) && trigger.source === 'vscode' && trigger.human) return { admissible: true, strength: 'explicit', basis: { via: 'addressed', addressed: 'direct', sender: trigger.actor.id, source: trigger.source } }
     const family = sourceFamily(trigger.source), source = family && settings.sources[family]
-    if (!source?.enabled || trigger.actor.source !== trigger.source) return { admissible: false, reason: 'sourceDisabled' }
+    if (!source?.enabled || !listened(trigger.source) || trigger.actor.source !== trigger.source) return { admissible: false, reason: 'sourceDisabled' }
     const listed = has(source.allowedActors, trigger.actor.id)
     const recorded = { source: trigger.source, scope: trigger.meta, ...(listed ? { sender: trigger.actor.id } : {}) }
     if (trigger.human && listed && trigger.addressed) return { admissible: true, strength: 'explicit', basis: { ...recorded, via: 'addressed', addressed: trigger.addressed } }
@@ -162,7 +164,7 @@ export function automationPolicy(settings: AutomationSettings, paused = false): 
     revalidate(mandate: Mandate) {
       if (local(mandate.actor.source, mandate.actor.id)) return true
       const family = sourceFamily(mandate.actor.source), source = family && settings.sources[family]
-      if (!source?.enabled || (mandate.strength === 'inferred' && !inferred(mandate.basis.rules ?? []))) return false
+      if (!source?.enabled || !listened(mandate.actor.source) || (mandate.strength === 'inferred' && !inferred(mandate.basis.rules ?? []))) return false
       if (mandate.basis.via === 'followup') return mandate.strength === 'explicit' || inferred(mandate.basis.rules ?? [])
       if (mandate.basis.via === 'bot') return has(source.allowedBots, mandate.actor.id)
       if (mandate.basis.via === 'admission') {

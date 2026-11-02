@@ -19,7 +19,7 @@ async function eventually(check: () => boolean) {
   const deadline = Date.now() + 3000
   while (!check()) { if (Date.now() > deadline) assert.fail('Automation did not settle'); await new Promise(resolve => setTimeout(resolve, 5)) }
 }
-function fixture(run?: (request: AgentRun) => Promise<void>, extra: { send?: (message: OutboundMessage) => Promise<void>; prepare?: () => Promise<string>; resolveThread?: (family: 'github' | 'teams', id: string, signal: AbortSignal) => Promise<ThreadRef> } = {}) {
+function fixture(run?: (request: AgentRun) => Promise<void>, extra: { send?: (message: OutboundMessage) => Promise<void>; prepare?: () => Promise<string>; resolveThread?: (family: 'github' | 'teams', id: string, signal: AbortSignal) => Promise<ThreadRef>; sourceNamespaces?: () => Partial<Record<'github' | 'teams', string[]>> } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'superagent-automation-'))
   const runtime = new TicketRuntime(directory)
   const inbox: Trigger[] = [], sent: OutboundMessage[] = [], runs: AgentRun[] = []
@@ -28,7 +28,7 @@ function fixture(run?: (request: AgentRun) => Promise<void>, extra: { send?: (me
     run: async request => { runs.push(request); if (run) await run(request); else await request.tools.find(tool => tool.name === 'superagent_report')!.invoke({ state: 'ready', summary: 'Fixed and verified' }) },
     abort: async () => {}, dispose: async () => {},
   }
-  const service = new AutomationService(runtime, { backend, prepare: extra.prepare ?? (async () => directory), resolveThread: extra.resolveThread, poll: async () => inbox.splice(0), send: async message => { if (extra.send) await extra.send(message); sent.push(message) } })
+  const service = new AutomationService(runtime, { backend, prepare: extra.prepare ?? (async () => directory), resolveThread: extra.resolveThread, sourceNamespaces: extra.sourceNamespaces, poll: async () => inbox.splice(0), send: async message => { if (extra.send) await extra.send(message); sent.push(message) } })
   service.saveSettings({ enabled: true, sources: { github: { enabled: true, allowedActors: ['owner'], allowedBots: [], allowUnaddressed: true }, teams: { enabled: false, allowedActors: [], allowedBots: [], allowUnaddressed: false } }, execution: { retryBaseMs: 10 } }, 0)
   return { directory, runtime, service, inbox, sent, runs, backend, clean: async () => { await service.dispose(); runtime.dispose(); rmSync(directory, { recursive: true, force: true }) } }
 }
@@ -148,7 +148,7 @@ test('settings are versioned, conflict checked, and prompts can be restored', as
   } finally { await f.clean() }
 })
 
-test('worker concurrency is bounded and an explicit request uses the reserved human slot', async () => {
+test('new launches obey the original normal worker cap regardless of mandate strength', async () => {
   const releases: (() => void)[] = []
   const f = fixture(async request => {
     await new Promise<void>(resolve => { releases.push(resolve); request.signal.addEventListener('abort', () => resolve(), { once: true }) })
@@ -159,11 +159,11 @@ test('worker concurrency is bounded and an explicit request uses the reserved hu
     f.backend.assess = async () => ({ kind: 'accept', title: 'Repair', scope: 'Repair the defect', reason: 'Matched rule', rules: ['repair'] })
     const item = (id: string, addressed: 'mention' | undefined) => trigger(id, { addressed, threads: [{ source: 'github:scope', id }] })
     f.inbox.push(item('inferred-one', undefined), item('inferred-two', undefined)); f.service.start(); await f.service.pollNow()
-    await eventually(() => f.runtime.list().length === 2 && f.runs.length === 1)
-    f.inbox.push(item('explicit-three', 'mention')); await f.service.pollNow(); await eventually(() => f.runs.length === 2)
-    assert.equal(f.runtime.get(f.runs[1]!.ticketId).mandate.strength, 'explicit')
-    assert.equal(f.service.snapshot().health.workers, 2)
+    await eventually(() => f.runtime.list().length === 2 && f.runs.length === 2)
+    f.inbox.push(item('explicit-three', 'mention')); await f.service.pollNow(); await eventually(() => f.runtime.list().length === 3)
+    assert.equal(f.runs.length, 2)
     releases[0]!(); await eventually(() => f.runs.length === 3)
+    assert.equal(f.runtime.get(f.runs[2]!.ticketId).mandate.strength, 'explicit')
     assert.equal(f.service.snapshot().health.workers, 2)
   } finally { await f.clean() }
 })
@@ -375,4 +375,139 @@ test('unverifiable lock owners and interrupted acquisition guards are preserved 
     assert.equal(readFileSync(`${lock}.acquire`, 'utf8'), 'interrupted-acquisition')
     assert.equal(readFileSync(lock, 'utf8'), body)
   } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+
+test('removing a configured namespace revokes old workers even if the source family remains enabled', async () => {
+  let scopes = ['github:scope', 'github:other']
+  const f = fixture(async request => new Promise<void>(resolve => request.signal.addEventListener('abort', () => resolve(), { once: true })), { sourceNamespaces: () => ({ github: scopes }) })
+  try {
+    f.inbox.push(trigger('scope-revoked')); f.service.start(); await f.service.pollNow(); await eventually(() => f.runs.length === 1)
+    scopes = ['github:other']; f.service.kick()
+    await eventually(() => f.runs[0]!.signal.aborted)
+    await assert.rejects(() => f.runs[0]!.tools.find(tool => tool.name === 'orchestrator_ack')!.invoke({ trigger_id: 'scope-revoked', text: 'Stale' }), /abort|revoked/i)
+  } finally { await f.clean() }
+})
+
+
+test('production worker prompt includes execution migration overrides and report schema accepts the documented no-PR form', async () => {
+  const f = fixture(async request => {
+    const report = request.tools.find(tool => tool.name === 'orchestrator_report')!
+    const schema = report.schema as { properties: { pr_number: { type: unknown } } }
+    assert.deepEqual(schema.properties.pr_number.type, ['integer', 'null'])
+    await report.invoke({ state: 'blocked', summary: 'Need operator input', human_action: 'Which behavior?', pr_number: null })
+  })
+  const service = new AutomationService(f.runtime, { backend: f.backend, prepare: async () => f.directory, poll: async () => [], send: async () => {}, promptParts: { 'role/worker': 'Worker', 'runtime/execution': 'CURRENT COPILOT EXECUTION' } })
+  try {
+    assert.match(service.previewPrompt('worker'), /CURRENT COPILOT EXECUTION/)
+    f.runtime.create('Check report contract'); service.start(); await eventually(() => !!f.runtime.list()[0]?.attention)
+  } finally { await service.dispose(); await f.clean() }
+})
+
+test('same-conversation replies wait for their acknowledgement while independent conversations can send', async () => {
+  let release!: () => void
+  const first = new Promise<void>(resolve => { release = resolve })
+  const f = fixture(async request => {
+    const id = request.prompt.match(/"triggerId":"([^"]+)"/)?.[1] ?? 'ordered'
+    await request.tools.find(tool => tool.name === 'orchestrator_ack')!.invoke({ trigger_id: id, text: 'I will repair this.' })
+    await request.tools.find(tool => tool.name === 'orchestrator_report')!.invoke({ state: 'ready', summary: 'Repair complete' })
+  }, { send: async message => { if (message.kind === 'acknowledgement') await first } })
+  try {
+    f.inbox.push(trigger('ordered')); f.service.start(); await f.service.pollNow()
+    await eventually(() => f.service.snapshot().effects.some(e => e.kind === 'outbound' && e.status === 'running'))
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(f.sent.length, 0)
+    release(); await eventually(() => f.sent.length === 2)
+    assert.equal(f.sent[0]!.kind, 'acknowledgement')
+  } finally { release(); await f.clean() }
+})
+
+
+test('a correction steers an active session without waiting for the original turn or allocating another worker', async () => {
+  const steered: string[] = []
+  const f = fixture(async request => new Promise<void>(resolve => request.signal.addEventListener('abort', () => resolve(), { once: true })))
+  f.backend.steer = async input => { steered.push(input.prompt); input.onAccepted(); input.onConsumed() }
+  try {
+    f.inbox.push(trigger('steering')); f.service.start(); await f.service.pollNow(); await eventually(() => f.runs.length === 1)
+    const ticket = f.runtime.list()[0]!
+    f.runtime.followup(ticket.id, 'Leave the migration unchanged')
+    await eventually(() => steered.length === 1)
+    assert.match(steered[0]!, /Leave the migration unchanged/)
+    assert.equal(f.runs.length, 1); assert.equal(f.service.snapshot().health.workers, 1)
+    assert.equal(f.runtime.get(ticket.id).undelivered.length, 0)
+  } finally { await f.clean() }
+})
+
+test('an explicit reference from another conversation attaches to and resumes the original authorized ticket', async () => {
+  const f = fixture(async request => {
+    if (request.prompt.includes('attach-reference')) await request.tools.find(tool => tool.name === 'orchestrator_ack')!.invoke({ trigger_id: 'attach-reference', text: 'Continuing the existing repair' })
+    await request.tools.find(tool => tool.name === 'orchestrator_report')!.invoke({ state: 'ready', summary: 'Fixed and verified' })
+  })
+  try {
+    f.inbox.push(trigger('original-work')); f.service.start(); await f.service.pollNow(); await eventually(() => !!f.runtime.list()[0]?.ended)
+    const ticket = f.runtime.list()[0]!
+    f.backend.assess = async () => ({ kind: 'attach', ticketId: ticket.id, reason: 'Explicit existing-ticket reference', note: 'Same immutable scope' })
+    f.inbox.push(trigger('attach-reference', { threads: [{ source: 'github:scope', id: 'another-thread' }] }))
+    await f.service.pollNow(); await eventually(() => f.runs.length === 2)
+    assert.equal(f.runtime.list().length, 1)
+    assert.ok(f.runtime.get(ticket.id).inputs.some(input => input.kind === 'trigger' && input.triggerId === 'attach-reference'))
+    assert.equal(f.runtime.get(ticket.id).mandate.scope, ticket.mandate.scope)
+  } finally { await f.clean() }
+})
+
+
+test('one existing human continuation can exceed normal capacity; a second wake waits', async () => {
+  const holds = new Map<string, () => void>()
+  const f = fixture(async request => {
+    if (request.prompt.includes('Wake me')) await new Promise<void>(resolve => { holds.set(request.ticketId, resolve); request.signal.addEventListener('abort', () => resolve(), { once: true }) })
+    await request.tools.find(tool => tool.name === 'orchestrator_report')!.invoke({ state: 'waiting', summary: 'Waiting for input' })
+  })
+  try {
+    f.service.saveSettings({ execution: { concurrency: 1, humanReserve: 1 } }, 1)
+    const a = f.runtime.create('First parked worker'), b = f.runtime.create('Second parked worker'), c = f.runtime.create('Third parked worker')
+    f.service.start(); await eventually(() => f.runs.length === 3 && f.service.snapshot().health.workers === 0)
+    f.runtime.followup(a.id, 'Wake me and hold')
+    await eventually(() => f.service.snapshot().health.workers === 1)
+    f.runtime.followup(b.id, 'Wake me and hold')
+    await eventually(() => f.service.snapshot().health.workers === 2)
+    const d = f.runtime.create('New launch waits behind human wakes')
+    f.runtime.followup(c.id, 'Wake me and hold')
+    await new Promise(resolve => setTimeout(resolve, 30)); assert.equal(f.runs.length, 5)
+    holds.get(a.id)!()
+    await eventually(() => f.runs.length === 6)
+    assert.equal(f.runs[5]!.ticketId, c.id)
+    assert.equal(f.service.snapshot().health.workers, 2)
+    holds.get(b.id)!(); holds.get(c.id)!()
+    await eventually(() => f.runs.some(run => run.ticketId === d.id))
+  } finally { await f.clean() }
+})
+
+
+test('router notes carry context without creating work and status requests reach the same waiting worker', async () => {
+  const f = fixture(async request => { await request.tools.find(tool => tool.name === 'orchestrator_report')!.invoke({ state: 'waiting', summary: 'Awaiting feedback' }) })
+  try {
+    const ticket = f.runtime.create('An approved repair'); f.service.start()
+    await eventually(() => f.runs.length === 1 && f.service.snapshot().health.workers === 0)
+    f.backend.assess = async () => ({ kind: 'note', ticketId: ticket.id, text: 'A related observation', reason: 'Context only' })
+    f.inbox.push(trigger('router-note')); await f.service.pollNow()
+    await eventually(() => f.runtime.get(ticket.id).inputs.some(input => input.kind === 'note'))
+    assert.equal(f.runtime.list().length, 1); assert.equal(f.runtime.get(ticket.id).mandate.scope, ticket.mandate.scope)
+    await eventually(() => f.service.snapshot().health.workers === 0)
+    f.backend.assess = async prompt => prompt.includes('stop-only') ? { kind: 'ignore', reason: 'Status request' } : { kind: 'status', ticketId: ticket.id, reason: 'Explicit status request' }
+    f.inbox.push(trigger('router-status', { threads: [{ source: 'github:scope', id: 'status-conversation' }] }))
+    const before = f.runs.length
+    await f.service.pollNow(); await eventually(() => f.runs.length > before)
+    assert.ok(f.runs.every(run => run.ticketId === ticket.id))
+  } finally { await f.clean() }
+})
+
+test('router attachment cannot revive a ticket stopped by a person', async () => {
+  const f = fixture()
+  try {
+    const ticket = f.runtime.create('A withdrawn request'); f.runtime.stop(ticket.id)
+    f.backend.assess = async () => ({ kind: 'attach', ticketId: ticket.id, reason: 'Similar subject' })
+    f.inbox.push(trigger('stopped-attach')); f.service.start(); await f.service.pollNow()
+    await eventually(() => f.service.snapshot().effects.some(effect => effect.kind === 'assessment' && effect.attempts > 0))
+    assert.equal(f.runtime.get(ticket.id).ended?.by, 'human'); assert.equal(f.runs.length, 0)
+  } finally { await f.clean() }
 })

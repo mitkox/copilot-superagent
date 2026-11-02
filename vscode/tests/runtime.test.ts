@@ -21,7 +21,7 @@ test('local approval creates a durable pending ticket; beginning delivers its in
     assert.equal(f.runtime.begin(ticket.id).assignments.at(-1)?.state, 'running')
     assert.equal(f.runtime.get(ticket.id).undelivered.length, 0)
     assert.equal(f.runtime.report(ticket.id, 'ready', 'Validation fixed and tests passed').ended?.outcome, 'completed')
-    assert.equal(statSync(join(f.directory, 'state.json')).mode & 0o777, 0o600)
+    if (process.platform !== 'win32') assert.equal(statSync(join(f.directory, 'state.json')).mode & 0o777, 0o600)
     const audit = JSON.stringify(JSON.parse(readFileSync(join(f.directory, 'state.json'), 'utf8')).data.audit)
     assert.doesNotMatch(audit, /login form|Validation fixed/)
   } finally { f.clean() }
@@ -249,4 +249,56 @@ test('source cursor metadata extends legacy state under the same checksum and lo
     assert.equal(state.version, 1)
     assert.equal(state.data.extension.version, 1)
   } finally { reopened?.dispose(); f.clean() }
+})
+
+
+test('native PR bindings use the provider namespace and legacy bindings migrate without changing tickets', () => {
+  const f = fixture()
+  try {
+    const ticket = f.runtime.create('Follow the repair PR')
+    f.runtime.bindPullRequest(ticket.id, 42, true, 'legacy-credential-key')
+    const namespace = 'github:' + 'a'.repeat(64)
+    f.runtime.migratePullRequestSource('legacy-credential-key', namespace)
+    assert.equal(f.runtime.get(ticket.id).follows?.[0]?.thread, namespace + ':42')
+    assert.equal(f.runtime.matchesPullRequestSource(ticket.id, namespace), true)
+    f.runtime.closePullRequest(42, 'merged', namespace)
+    assert.equal(f.runtime.get(ticket.id).follows?.[0]?.closed?.outcome, 'merged')
+  } finally { f.clean() }
+})
+
+
+test('aggregate transcript retention cannot exhaust control writes and large authoritative history reopens without pruning', () => {
+  const f = fixture()
+  try {
+    const ticket = f.runtime.create('Retain identity and receipt history')
+    f.runtime.repositories.mutateAutomation(data => {
+      data.sessions.push({ ticketId: ticket.id, sessionId: 'large-session', status: 'idle', revisions: [], transcript: Array.from({ length: 500 }, (_, i) => ({ type: 'tool', at: String(i), text: '界"\\'.repeat(12000) })) })
+      data.metadata['delivery:uncertain'] = { attempted: true }
+    })
+    f.runtime.stop(ticket.id)
+    assert.ok(Buffer.byteLength(JSON.stringify(f.runtime.repositories.automation().sessions[0]!.transcript)) < 300_000)
+    f.runtime.repositories.mutateAutomation(data => { for (let i = 0; i < 20; i++) data.metadata['authoritative-' + i] = 'record' + String(i) + 'x'.repeat(900_000) })
+    f.runtime.dispose()
+    const reopened = new TicketRuntime(f.directory)
+    try {
+      assert.equal(reopened.get(ticket.id).ended?.by, 'human')
+      assert.equal(reopened.readData<{ attempted: boolean }>('delivery:uncertain')?.attempted, true)
+      assert.equal(reopened.readData<string>('authoritative-19')?.length, 900_008)
+    } finally { reopened.dispose() }
+  } finally { f.clean() }
+})
+
+
+test('a damaged archive is rejected without replacing the committed manifest or records', () => {
+  const f = fixture()
+  try {
+    f.runtime.repositories.mutateAutomation(data => { data.metadata.large = 'x'.repeat(9 * 1024 * 1024) })
+    f.runtime.dispose()
+    const path = join(f.directory, 'state.json'), manifest = readFileSync(path, 'utf8')
+    const name = JSON.parse(manifest).chunks[0]
+    writeFileSync(join(f.directory, 'archive', name), 'corrupt')
+    assert.throws(() => new TicketRuntime(f.directory), /preserved/)
+    assert.equal(readFileSync(path, 'utf8'), manifest)
+    assert.equal(readFileSync(join(f.directory, 'archive', name), 'utf8'), 'corrupt')
+  } finally { f.clean() }
 })

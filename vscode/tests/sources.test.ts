@@ -507,3 +507,35 @@ test('Graph messageReference attachments and quote chains preserve the subscribe
   assert.deepEqual(context.provider === 'teams' && context.referencedMessageIds, ['101'])
   assert.deepEqual(sourceTrigger(result[0]!).threads.map(thread => thread.id), ['100', '101'])
 })
+
+
+test('own PR discovery checkpoints large histories rather than failing all supervision at the page cap', async () => {
+  const { discoverOwnPullRequestsBatch } = await import('../src/sources.ts')
+  const config = { origin: 'https://api.github.com', repository: 'owner/repo', account: 'agent', token: 'test-token', allowedActors: ['owner'] }
+  const pages: number[] = []
+  const transport: typeof fetch = async input => {
+    const url = new URL(String(input)), page = Number(url.searchParams.get('page')); pages.push(page)
+    return Response.json(page <= 5 ? Array.from({ length: 100 }, (_, i) => ({ number: (page - 1) * 100 + i + 1, user: { login: 'other' } })) : [{ number: 501, user: { login: 'agent' }, head: { sha: 'a'.repeat(40), ref: 'superagent/' + 'b'.repeat(32) }, state: 'open' }])
+  }
+  const first = await discoverOwnPullRequestsBatch(config, undefined, undefined, transport)
+  assert.equal(first.items.length, 0); assert.equal(first.nextPage, 6)
+  const next = await discoverOwnPullRequestsBatch(config, first.nextPage, undefined, transport)
+  assert.equal(next.items[0]?.number, 501); assert.equal(next.nextPage, undefined)
+  assert.deepEqual(pages, [1, 2, 3, 4, 5, 6])
+})
+
+
+test('unlisted source candidates require explicit transport opt-in and retain unlisted policy facts', async () => {
+  const fetcher: typeof fetch = async input => json(new URL(String(input)).pathname.endsWith('/issues') ? [issue('@agent repair', { user: { login: 'other', type: 'User' } })] : [])
+  assert.equal((await pollGitHub(config, undefined, fetcher)).length, 0)
+  const received = await pollGitHub({ ...config, allowedActors: [], receiveUnlisted: true }, undefined, fetcher)
+  assert.equal(received.length, 1); assert.equal(received[0]!.context!.allowedActor, false)
+  await assert.rejects(pollGitHub({ ...config, receiveUnlisted: 'yes' as unknown as boolean }, undefined, fetcher), /configuration/)
+  const input = { ...teams, allowedActors: [], receiveUnlisted: true, directChatIds: teams.chatIds }
+  const direct = await pollTeams(input, undefined, async () => json({ value: [message()] }))
+  assert.equal(direct.length, 1); assert.equal(sourceTrigger(direct[0]!).addressed, 'direct')
+  assert.equal(direct[0]!.context!.allowedActor, false)
+  const group = await pollTeams({ ...input, directChatIds: [] }, undefined, async () => json({ value: [message()] }))
+  assert.equal(sourceTrigger(group[0]!).addressed, undefined)
+  await assert.rejects(pollTeams({ ...input, directChatIds: ['unconfigured'] }), /configuration/)
+})

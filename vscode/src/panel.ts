@@ -19,8 +19,19 @@ export class SuperagentPanel implements vscode.Disposable {
     panel.onDidDispose(() => { this.panel = undefined })
     panel.webview.onDidReceiveMessage(async (message: unknown) => {
       if (!message || typeof message !== 'object' || Array.isArray(message)) return
-      try { await this.host.action(message as Record<string, unknown>); this.refresh() }
-      catch { await panel.webview.postMessage({ type: 'notice', text: 'Operation failed. Check policy, credentials and the service health before retrying.' }) }
+      const request = message as Record<string, unknown>
+      const saving = request.action === 'saveSettings' && Number.isSafeInteger(request.requestId)
+      try {
+        await this.host.action(request)
+        if (saving) {
+          const snapshot = this.host.snapshot() as { settings?: { revision?: number } }
+          await panel.webview.postMessage({ type: 'saveSettingsResult', requestId: request.requestId, success: true, revision: snapshot.settings?.revision })
+        }
+        this.refresh()
+      } catch {
+        if (saving) await panel.webview.postMessage({ type: 'saveSettingsResult', requestId: request.requestId, success: false })
+        await panel.webview.postMessage({ type: 'notice', text: 'Operation failed. Check policy, credentials and the service health before retrying.' })
+      }
     })
   }
   refresh(): void { if (this.panel) void this.panel.webview.postMessage({ type: 'state', value: this.host.snapshot() }) }

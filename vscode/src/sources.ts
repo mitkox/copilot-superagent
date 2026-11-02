@@ -82,6 +82,8 @@ export interface GitHubSourceConfig {
   observeChecks?: boolean
   /** Bot events are context only, including when explicitly listed here. */
   allowedBots?: string[]
+  /** Host policy may admit unlisted candidates; this transport flag itself grants no authority. */
+  receiveUnlisted?: boolean
 }
 export interface TeamsSourceConfig {
   /** Native auth must select this tenant. The caller must never reuse a token entered for another tenant. */
@@ -95,6 +97,9 @@ export interface TeamsSourceConfig {
   /** Native `thread` values from approved tickets, never taken from a remote message. */
   subscribedThreads?: string[]
   allowedBots?: string[]
+  receiveUnlisted?: boolean
+  /** Provider-verified one-to-one chats, supplied by the tenant-pinned host. */
+  directChatIds?: string[]
 }
 
 const MAX_BYTES = 1024 * 1024
@@ -242,12 +247,12 @@ export function validateGitHub(config: GitHubSourceConfig): URL {
     || !config.allowedActors.every(actor => LOGIN.test(actor)) || !validSince(config.since)
     || config.subscribedNumbers !== undefined && (!Array.isArray(config.subscribedNumbers) || config.subscribedNumbers.length > 1000 || !config.subscribedNumbers.every(positive))
     || config.allowedBots !== undefined && (!Array.isArray(config.allowedBots) || config.allowedBots.length > 1000 || !config.allowedBots.every(actor => typeof actor === 'string' && /^[a-z\d-]{1,39}(?:\[bot\])?$/i.test(actor)))
-    || ['observeIssues', 'observePullRequests', 'observeComments', 'observeReviews', 'observeChecks'].some(key => (config as unknown as RecordValue)[key] !== undefined && typeof (config as unknown as RecordValue)[key] !== 'boolean')) fail('Invalid source configuration')
+    || ['observeIssues', 'observePullRequests', 'observeComments', 'observeReviews', 'observeChecks', 'receiveUnlisted'].some(key => (config as unknown as RecordValue)[key] !== undefined && typeof (config as unknown as RecordValue)[key] !== 'boolean')) fail('Invalid source configuration')
   return base
 }
 
 /** Namespaces provider-native thread IDs by their actual receiving scope. */
-export function sourceNamespace(context: SourceContext): string {
+export function sourceNamespace(context: Pick<GitHubContext, 'provider' | 'origin' | 'repository'> | Pick<TeamsContext, 'provider' | 'tenantId' | 'chatId' | 'teamId' | 'channelId'>): string {
   return context.provider === 'github' ? `github:${id(githubBase(context.origin).href, context.repository.toLowerCase())}`
     : `teams:${id(context.tenantId.toLowerCase(), context.chatId ? `chat:${context.chatId}` : `team:${context.teamId?.toLowerCase()}:channel:${context.channelId}`)}`
 }
@@ -288,7 +293,7 @@ function githubItem(config: GitHubSourceConfig, base: URL, item: RecordValue, nu
   const observed = kind === 'issue' ? config.observeIssues : kind === 'pull' ? config.observePullRequests
     : kind === 'review' || kind === 'review-comment' ? config.observeReviews : config.observeComments
   const listedBot = config.allowedBots?.some(value => value.toLowerCase() === actor.toLowerCase()) ?? false
-  if (!force && !subscribed && !(human && allowedActor && (addressed || observed)) && !(listedBot && observed)) return
+  if (!force && !subscribed && !(human && (allowedActor || config.receiveUnlisted) && (addressed || observed)) && !(listedBot && observed)) return
   let url = githubWeb(base, config.repository, number, pull, anchor)
   if (typeof item.html_url === 'string') {
     try {
@@ -346,7 +351,7 @@ export async function readPullRequest(config: GitHubSourceConfig, number: number
 /** Explicitly invoked bounded scan. The host persists IDs and obtains native UI approval before creating work. */
 export async function pollGitHub(config: GitHubSourceConfig, signal?: AbortSignal, transport: typeof fetch = fetch): Promise<InboxItem[]> {
   const base = validateGitHub(config)
-  if (!config.allowedActors.length && !config.subscribedNumbers?.length && !config.allowedBots?.length) return []
+  if (!config.allowedActors.length && !config.subscribedNumbers?.length && !config.allowedBots?.length && !config.receiveUnlisted) return []
   const path = `/repos/${config.repository}`
   // Serial reads bound rate use and make a partial failed scan non-authoritative.
   const issues = await githubPages(base, `${path}/issues`, config.token, signal, transport, config.since)
@@ -386,7 +391,7 @@ export interface GitHubReviewCursor {
 export async function pollGitHubReviewsBatch(config: GitHubSourceConfig, cursor?: GitHubReviewCursor, signal?: AbortSignal,
   transport: typeof fetch = fetch): Promise<{ items: InboxItem[]; next?: GitHubReviewCursor }> {
   const base = validateGitHub(config)
-  if (!config.allowedActors.length && !config.subscribedNumbers?.length && !config.allowedBots?.length) return { items: [] }
+  if (!config.allowedActors.length && !config.subscribedNumbers?.length && !config.allowedBots?.length && !config.receiveUnlisted) return { items: [] }
   const state: GitHubReviewCursor = cursor ?? { prPage: 1, prOffset: 0, reviewPage: 1 }
   const digestValid = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
   if (!positive(state.prPage) || state.prPage > 1_000_000 || !Number.isSafeInteger(state.prOffset) || state.prOffset < 0 || state.prOffset > 25
@@ -529,7 +534,9 @@ function teamsReferences(message: RecordValue, chatId: string): string[] {
 }
 export function validateTeams(config: TeamsSourceConfig): void {
   checkToken(config.token)
-  if (!UUID.test(config.tenantId) || !Array.isArray(config.chatIds) || config.chatIds.length > 50
+  if (config.receiveUnlisted !== undefined && typeof config.receiveUnlisted !== 'boolean'
+    || config.directChatIds !== undefined && (!Array.isArray(config.directChatIds) || config.directChatIds.length > 50 || !Array.isArray(config.chatIds) || !config.directChatIds.every(id => config.chatIds.includes(id)))
+    || !UUID.test(config.tenantId) || !Array.isArray(config.chatIds) || config.chatIds.length > 50
     || !config.chatIds.every(chat => TEAMS_ID.test(chat) && chat !== '.' && chat !== '..')
     || !Array.isArray(config.channels) || config.channels.length > 50
     || !config.channels.every(channel => UUID.test(channel.teamId) && TEAMS_ID.test(channel.channelId) && channel.channelId !== '.' && channel.channelId !== '..')
@@ -540,7 +547,7 @@ export function validateTeams(config: TeamsSourceConfig): void {
 }
 export async function pollTeamsBatch(config: TeamsSourceConfig, cursor?: TeamsBatchCursor, signal?: AbortSignal, transport: typeof fetch = fetch): Promise<{ items: InboxItem[]; next?: TeamsBatchCursor }> {
   validateTeams(config)
-  if (!config.allowedActors.length && !config.subscribedThreads?.length) return { items: [] }
+  if (!config.allowedActors.length && !config.subscribedThreads?.length && !config.receiveUnlisted) return { items: [] }
   if (cursor && (config.chatIds.length !== 0 || config.channels.length !== 1 || !Number.isSafeInteger(cursor.offset) || cursor.offset < 0 || cursor.offset > 50
     || cursor.token !== undefined && (typeof cursor.token !== 'string' || !cursor.token || cursor.token.length > 8192)
     || cursor.offset > 0 && (typeof cursor.pageHash !== 'string' || !/^[a-f0-9]{64}$/.test(cursor.pageHash)))) fail('Invalid source configuration')
@@ -554,7 +561,7 @@ export async function pollTeamsBatch(config: TeamsSourceConfig, cursor?: TeamsBa
     const human = !!user && !application, allowedActor = human && allowed.has(actor.toLowerCase())
     const subscribed = config.subscribedThreads?.includes(`${scope}:${rootMessageId}`) ?? false
     if (!UUID.test(actor) || actor.toLowerCase() === config.accountId?.toLowerCase() || !TEAMS_ID.test(messageId) || ['.', '..'].includes(messageId)
-      || !TEAMS_ID.test(rootMessageId) || ['.', '..'].includes(rootMessageId) || !subscribed && !allowedActor
+      || !TEAMS_ID.test(rootMessageId) || ['.', '..'].includes(rootMessageId) || !subscribed && !allowedActor && !(human && config.receiveUnlisted)
       || message.deletedDateTime || message.messageType !== 'message' || !body || user?.tenantId !== undefined && text(user.tenantId).toLowerCase() !== config.tenantId.toLowerCase()) return
     if (!recent(message.lastModifiedDateTime ?? message.createdDateTime, config.since)) return
     const content = teamsText(body)
@@ -569,7 +576,7 @@ export async function pollTeamsBatch(config: TeamsSourceConfig, cursor?: TeamsBa
     const context: TeamsContext = { provider: 'teams', sourceConfigId: `teams:${id(config.tenantId.toLowerCase(), scope)}`,
       tenantId: config.tenantId, ...receiving, nativeThreadId: rootMessageId, rootMessageId, messageId, human, bot: !human,
       ...(references.length ? { referencedMessageIds: references } : {}),
-      allowedActor, subscribed, ...(mentions ? { addressed: 'mention' } : {}), ...(url ? { originalUrl: url } : {}),
+      allowedActor, subscribed, ...('chatId' in receiving && config.directChatIds?.includes(receiving.chatId) ? { addressed: 'direct' as const } : mentions ? { addressed: 'mention' as const } : {}), ...(url ? { originalUrl: url } : {}),
       ...(text(message.createdDateTime) ? { createdAt: text(message.createdDateTime) } : {}),
       ...(text(message.lastModifiedDateTime) ? { updatedAt: text(message.lastModifiedDateTime) } : {}),
       ...(text(message.lastEditedDateTime) ? { editedAt: text(message.lastEditedDateTime) } : {}) }
@@ -629,14 +636,32 @@ export interface PullRequestDiscovery {
 }
 /** Bounded repository-local discovery; no search API or response-supplied URLs are followed. */
 export async function discoverOwnPullRequests(config: GitHubSourceConfig, signal?: AbortSignal, transport: typeof fetch = fetch): Promise<PullRequestDiscovery[]> {
+  return (await discoverOwnPullRequestsBatch(config, undefined, signal, transport)).items
+}
+
+/** PR creation order is stable across edits; bounded scans resume without delaying existing PR monitoring. */
+export async function discoverOwnPullRequestsBatch(config: GitHubSourceConfig, nextPage = 1, signal?: AbortSignal, transport: typeof fetch = fetch): Promise<{ items: PullRequestDiscovery[]; nextPage?: number }> {
   const base = validateGitHub(config)
-  const rows = await githubPages(base, `/repos/${config.repository}/pulls`, config.token, signal, transport)
-  return rows.filter(pull => text(object(pull.user)?.login).toLowerCase() === config.account.toLowerCase()).map(pull => {
+  if (!Number.isSafeInteger(nextPage) || nextPage < 1) fail('Invalid discovery continuation')
+  const rows: RecordValue[] = []
+  let continuation: number | undefined
+  for (let offset = 0; offset < MAX_PAGES; offset++) {
+    const page = nextPage + offset, url = new URL(base)
+    url.pathname = `${base.pathname.replace(/\/$/, '')}/repos/${config.repository}/pulls`
+    url.search = new URLSearchParams({ state: 'all', sort: 'created', direction: 'asc', per_page: '100', page: String(page) }).toString()
+    const { value, headers } = await request(url, config.token, signal, transport)
+    if (!Array.isArray(value) || !value.every(item => object(item))) fail('Invalid source response')
+    rows.push(...value as RecordValue[])
+    if (value.length < 100 && !/rel\s*=\s*"?next\b/i.test(headers.get('link') ?? '')) { continuation = undefined; break }
+    continuation = page + 1
+  }
+  const items = rows.filter(pull => text(object(pull.user)?.login).toLowerCase() === config.account.toLowerCase()).map(pull => {
     const head = object(pull.head)
     if (!positive(pull.number) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(text(head?.sha)) || !['open', 'closed'].includes(text(pull.state))) fail('Invalid source response')
     return { number: pull.number, head: text(head?.sha), branch: boundedText(text(head?.ref)), state: pull.state as 'open' | 'closed',
       url: githubWeb(base, config.repository, pull.number, true), author: text(object(pull.user)?.login) }
   })
+  return { items, ...(continuation ? { nextPage: continuation } : {}) }
 }
 
 /** Full issue/PR conversation, reviews and inline comments. Oversized histories fail visibly at five pages per collection. */

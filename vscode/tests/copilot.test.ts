@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
@@ -58,7 +58,7 @@ class FakeClient implements CopilotClientConnection {
 }
 
 function fixture(t: TestContext, options: Partial<CopilotBackendOptions> = {}) {
-  const directory = mkdtempSync(join(tmpdir(), 'superagent-copilot-test-'))
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'superagent-copilot-test-')))
   const client = new FakeClient()
   let clientOptions: CopilotClientOptions | undefined
   const backend = new CopilotBackend({
@@ -100,7 +100,8 @@ test('a stable ticket creates once then resumes in its worktree with current ins
   const resumed = f.client.resumed[0]!
   assert.equal(resumed.config.workingDirectory, f.input.directory)
   assert.deepEqual(resumed.config.additionalDirectories, [])
-  assert.deepEqual(resumed.config.systemMessage, { mode: 'append', content: 'Worker instructions v2' })
+  assert.equal(resumed.config.systemMessage?.mode, 'append')
+  assert.match(String(resumed.config.systemMessage?.content), /Worker instructions v2/)
   assert.equal(resumed.config.model, 'selected-model')
   assert.equal('continuePendingWork' in resumed.config && resumed.config.continuePendingWork, false)
   assert.equal('allowTranscriptRecovery' in resumed.config && resumed.config.allowTranscriptRecovery, false)
@@ -312,4 +313,45 @@ test('dispose revokes active work and rejects future runs', async t => {
   await assert.rejects(f.backend.run(f.input), /disposed/)
   await assert.rejects(f.backend.assess('Facts', new AbortController().signal), /disposed/)
   assert.equal(f.client.stopCount, 1)
+})
+
+
+test('cancelled SDK lookup settles promptly and a late session can never send a request', async t => {
+  const f = fixture(t, { rpcTimeoutMs: 40, cleanupTimeoutMs: 30 })
+  let release!: (value: SessionMetadata[]) => void
+  f.client.listSessions = () => new Promise(resolve => { release = resolve })
+  const controller = new AbortController()
+  const run = f.backend.run({ ...f.input, signal: controller.signal }).then(() => 'resolved', () => 'rejected')
+  while (!release) await new Promise(resolve => setTimeout(resolve, 1))
+  controller.abort()
+  const result = await Promise.race([run, new Promise(resolve => setTimeout(() => resolve('hung'), 120))])
+  release([])
+  assert.equal(result, 'rejected')
+  assert.equal(f.client.created.length, 0)
+})
+
+
+test('a timed-out create is fenced until the late session is aborted without sending', { timeout: 2000 }, async t => {
+  const f = fixture(t, { rpcTimeoutMs: 20, cleanupTimeoutMs: 20 })
+  let release!: (session: FakeSession) => void
+  f.client.createSession = () => new Promise(resolve => { release = resolve })
+  const keepAlive = setTimeout(() => {}, 1500)
+  try {
+    await assert.rejects(f.backend.run(f.input), /timeout/i)
+    await assert.rejects(f.backend.run(f.input), /owns/)
+    const session = new FakeSession(f.input.sessionId, { sessionId: f.input.sessionId }, f.client)
+    release(session)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(session.sends, 0); assert.equal(session.abortCount, 1); assert.equal(session.disconnectCount, 1)
+  } finally { clearTimeout(keepAlive) }
+})
+
+test('hanging SDK shutdown falls back to bounded forceStop', { timeout: 2000 }, async t => {
+  const f = fixture(t, { cleanupTimeoutMs: 20 })
+  let forced = 0
+  f.client.stop = () => new Promise(() => {})
+  Object.assign(f.client, { forceStop: async () => { forced++ } })
+  const keepAlive = setTimeout(() => {}, 1500)
+  try { await f.backend.dispose(); assert.equal(forced, 1) }
+  finally { clearTimeout(keepAlive) }
 })

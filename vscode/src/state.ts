@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { hostname } from 'node:os'
 import type { Candidate, Decision, OutboundMessage, Repositories, Thread, Ticket, Trigger, TriggerDisposition } from '../../src/core/index.ts'
@@ -30,6 +30,7 @@ export interface SessionRecord {
   assignmentId?: string
   status: 'idle' | 'working' | 'interrupted' | 'stopped'
   revisions: number[]
+  omittedEvents?: number
   transcript: { type: string; text: string; at: string }[]
 }
 export interface AutomationData {
@@ -162,6 +163,7 @@ export class DurableRepositories implements Repositories {
   private readonly lockPath: string
   private readonly statePath: string
   private readonly lockToken = randomUUID()
+  private chunks: string[] = []
   private readonly listeners = new Set<() => void>()
 
   constructor(private readonly directory: string) {
@@ -179,7 +181,22 @@ export class DurableRepositories implements Repositories {
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
       if (stat) {
         if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_STATE_BYTES || (process.platform !== 'win32' && (stat.mode & 0o077) !== 0)) throw new Error('Unsafe Superagent state file')
-        this.data = validate(JSON.parse(readFileSync(this.statePath, 'utf8')))
+        const envelope: unknown = JSON.parse(readFileSync(this.statePath, 'utf8'))
+        if (record(envelope) && envelope.version === 2) {
+          if (!Array.isArray(envelope.chunks) || !envelope.chunks.length || envelope.chunks.length > 4096 || !envelope.chunks.every(name => typeof name === 'string' && /^[a-f0-9]{64}$/.test(name))) throw new Error('Invalid state archive manifest')
+          const archive = lstatSync(join(this.directory, 'archive'))
+          if (!archive.isDirectory() || archive.isSymbolicLink() || process.platform !== 'win32' && (archive.mode & 0o077) !== 0) throw new Error('Unsafe state archive directory')
+          this.chunks = envelope.chunks as string[]
+          const body = Buffer.concat(this.chunks.map(name => {
+            const path = join(this.directory, 'archive', name), info = lstatSync(path)
+            if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024 || process.platform !== 'win32' && (info.mode & 0o077) !== 0) throw new Error('Unsafe state archive')
+            const bytes = readFileSync(path)
+            if (createHash('sha256').update(bytes).digest('hex') !== name) throw new Error('Corrupt state archive')
+            return bytes
+          }))
+          if (createHash('sha256').update(body).digest('hex') !== envelope.checksum) throw new Error('Corrupt state archive manifest')
+          this.data = validate(JSON.parse(body.toString('utf8')))
+        } else this.data = validate(envelope)
       }
     } catch (error) {
       this.dispose()
@@ -231,8 +248,42 @@ export class DurableRepositories implements Repositories {
   }
 
   private persist(): void {
-    const body = JSON.stringify({ version: 1, checksum: digest(this.data), data: this.data })
-    if (Buffer.byteLength(body) > MAX_STATE_BYTES) throw new Error('Superagent state capacity reached; archive reviewed work before continuing')
+    // Transcripts are replaceable telemetry. Authoritative domain/dedup/delivery history is never pruned.
+    let remaining = 2 * 1024 * 1024
+    for (const session of [...this.data.extension?.sessions ?? []].reverse()) {
+      let budget = Math.min(256 * 1024, remaining), size = 2
+      const retained: SessionRecord['transcript'] = []
+      for (const event of [...session.transcript].reverse()) {
+        const bytes = Buffer.byteLength(JSON.stringify(event)) + 1
+        if (size + bytes > budget || retained.length >= 500) continue
+        retained.unshift(event); size += bytes
+      }
+      session.omittedEvents = (session.omittedEvents ?? 0) + session.transcript.length - retained.length
+      session.transcript = retained; remaining -= size
+    }
+    const payload = Buffer.from(JSON.stringify({ version: 1, checksum: digest(this.data), data: this.data }))
+    let body = payload.toString('utf8'), chunks: string[] = []
+    if (payload.length > 4096 * 1024 * 1024) throw new Error('State archive exceeds supported capacity')
+    if (payload.length > MAX_STATE_BYTES / 2) {
+      const directory = join(this.directory, 'archive')
+      mkdirSync(directory, { recursive: true, mode: 0o700 })
+      const info = lstatSync(directory)
+      if (!info.isDirectory() || info.isSymbolicLink() || process.platform !== 'win32' && (info.mode & 0o077) !== 0) throw new Error('Unsafe state archive directory')
+      for (let offset = 0; offset < payload.length; offset += 1024 * 1024) {
+        const bytes = payload.subarray(offset, offset + 1024 * 1024), name = createHash('sha256').update(bytes).digest('hex')
+        const path = join(directory, name)
+        let file: number | undefined
+        try { file = openSync(path, 'wx', 0o600); writeFileSync(file, bytes); fsyncSync(file) }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+          const stat = lstatSync(path)
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== bytes.length || createHash('sha256').update(readFileSync(path)).digest('hex') !== name) throw new Error('Corrupt existing state archive')
+        } finally { if (file !== undefined) closeSync(file) }
+        chunks.push(name)
+      }
+      if (process.platform !== 'win32') { const fd = openSync(directory, constants.O_RDONLY); try { fsyncSync(fd) } finally { closeSync(fd) } }
+      body = JSON.stringify({ version: 2, checksum: createHash('sha256').update(payload).digest('hex'), chunks })
+    }
     const temporary = join(this.directory, `.state-${randomUUID()}.tmp`)
     let file: number | undefined
     let directoryFile: number | undefined
@@ -257,6 +308,11 @@ export class DurableRepositories implements Repositories {
       if (directoryFile !== undefined) closeSync(directoryFile)
       try { unlinkSync(temporary) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     }
+    this.chunks = chunks
+    try {
+      const keep = new Set(chunks)
+      for (const name of readdirSync(join(this.directory, 'archive'))) if (/^[a-f0-9]{64}$/.test(name) && !keep.has(name)) unlinkSync(join(this.directory, 'archive', name))
+    } catch { /* Cleanup cannot roll back a durable manifest; retry on the next commit. */ }
   }
 
   dispose(): void {
