@@ -137,6 +137,9 @@ export class CopilotBackend implements AgentBackend {
     this.assertOpen()
     input.signal.throwIfAborted()
     if (this.active.has(input.ticketId) || this.pendingSetup.has(input.sessionId)) throw new Error('A Copilot run already owns this ticket')
+    const parked = this.parked.get(input.ticketId)
+    if (parked?.session) await this.cleanup(parked.session, false)
+    this.parked.delete(input.ticketId)
     const state: ActiveRun = { controller: new AbortController(), active: true, input, nonce: randomUUID(), consumed: new Set(), deliveries: new Map() }
     state.ready = new Promise(resolve => { state.attached = resolve })
     const signal = AbortSignal.any([input.signal, state.controller.signal])
@@ -218,9 +221,16 @@ export class CopilotBackend implements AgentBackend {
       state.active = false
       signal.removeEventListener('abort', cancel)
       try {
-        if (state.handedOff) { await this.cancelTasks(state, true); this.parked.set(input.ticketId, state) }
+        if (state.handedOff) {
+          const retained = await this.cancelTasks(state, true)
+          if (state.handedOff && !this.disposed && retained) this.parked.set(input.ticketId, state)
+          else if (state.session) await this.cleanup(state.session, false)
+        }
         else if (state.session) await this.cleanup(state.session, false)
-      } finally { this.active.delete(input.ticketId) }
+      } finally {
+        this.active.delete(input.ticketId)
+        if (this.modelOwners.get(input.sessionId)?.state === state) this.modelOwners.delete(input.sessionId)
+      }
     }
   }
 
@@ -304,6 +314,7 @@ export class CopilotBackend implements AgentBackend {
     let read = false
     const delivery = { promise: Promise.resolve(), messageId: undefined as string | undefined, pending: true, consumed: () => { if (!read) { read = true; input.onConsumed() } } }
     state.deliveries!.set(input.requestId, delivery)
+    let sendAttempted = false
     delivery.promise = (async () => {
       await this.rpc(state.ready!, signal)
       const session = state.session!
@@ -315,13 +326,13 @@ export class CopilotBackend implements AgentBackend {
       if (previous?.type === 'user.message') { delivery.messageId = previous.data.messageId; input.onAccepted(); delivery.consumed(); return }
       state.input!.assertAuthorized?.(); signal.throwIfAborted()
       let id: string
-      try { id = await this.rpc(session.send({ prompt: `${marker}\n${input.prompt}`, mode: 'immediate', source: 'user' }), signal) }
+      try { sendAttempted = true; id = await this.rpc(session.send({ prompt: `${marker}\n${input.prompt}`, mode: 'immediate', source: 'user' }), signal) }
       catch (error) { throw Object.assign(new Error('Input admission is uncertain; reconcile the persistent session before retrying', { cause: error }), { name: 'InputAdmissionUncertain' }) }
       delivery.messageId = id
       input.onAccepted()
       if (state.consumed!.has(id)) delivery.consumed()
     })()
-    void delivery.promise.finally(() => { delivery.pending = false }).catch(() => {})
+    void delivery.promise.then(undefined, () => { if (!sendAttempted && state.deliveries!.get(input.requestId) === delivery) state.deliveries!.delete(input.requestId) }).finally(() => { delivery.pending = false }).catch(() => {})
     return delivery.promise
   }
 
@@ -350,7 +361,7 @@ export class CopilotBackend implements AgentBackend {
       if (!this.client.forceStop) throw error
       await this.rpc(this.client.forceStop(), undefined, true)
     }
-    this.parked.clear()
+    this.parked.clear(); this.modelOwners.clear(); this.sessionOwners.clear()
   }
 
   private async start(signal?: AbortSignal): Promise<void> {
@@ -393,10 +404,11 @@ export class CopilotBackend implements AgentBackend {
     }
   }
 
-  private async cancelTasks(state: ActiveRun, agentsOnly = false): Promise<void> {
-    if (!state.session?.rpc) return
+  private async cancelTasks(state: ActiveRun, agentsOnly = false): Promise<boolean> {
+    if (!state.session?.rpc) return false
     const { tasks } = await this.rpc(state.session.rpc.tasks.list(), undefined, true)
     await Promise.allSettled(tasks.filter(task => ['running', 'idle'].includes(task.status) && (!agentsOnly || task.type === 'agent')).map(task => this.rpc(state.session!.rpc!.tasks.cancel({ id: task.id }), undefined, true)))
+    return tasks.some(task => task.type !== 'agent' && task.status === 'running')
   }
 
   private async cleanup(session: CopilotSessionConnection, abort = true): Promise<void> {

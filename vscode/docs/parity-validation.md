@@ -19,7 +19,7 @@ model-routing authorization gate. Numbers below preserve that review's IDs.
 | 4 | Setup, lookup, resume, abort, disconnect, delete and shutdown RPCs are bounded; late setup cannot send work. | `copilot.test.ts`: pending lookup/create cancellation; real WebSocket abort and handoff fixtures. |
 | 5 | Router can read paginated existing work and attach an explicitly referenced trigger to an authorized existing or completed ticket. Stopped/revoked tickets remain protected. | `orchestration.test.ts`: cross-conversation attachment, stopped-ticket rejection, status and notes. |
 | 6 | Pending tools and every actual inference request revalidate the mandate against live exact provider namespaces. | `orchestration.test.ts`: namespace removal; `model-requests.test.ts`: revoked owners and unknown child rejection. |
-| 7 | Transcript byte budgets protect control writes; authoritative records use immutable checksummed chunks beyond the old 16-MiB ceiling. | `runtime.test.ts`: escaped/multibyte transcripts, stop, >16-MiB reopen, receipt retention, corrupt archive preservation. |
+| 7 | Transcript byte budgets protect control writes; authoritative records use immutable checksummed chunks beyond the old 16-MiB ceiling. | `runtime.test.ts`: escaped/multibyte transcripts, stop, >16-MiB reopen, receipt retention, corrupt archive preservation and partial-write recovery. |
 | 8 | Production prompt assembly includes runtime/execution migration and packaged skills; inaccessible DSH identity/loader instructions are replaced at build time. | `orchestration.test.ts`: assembled execution prompt; package inspection. |
 | 9 | `orchestrator_report` accepts documented `pr_number: null`. | `orchestration.test.ts`: actual tool schema and no-PR invocation. |
 | 10 | Same-conversation outbox delivery preserves enqueue order while independent conversations remain runnable. | `orchestration.test.ts`: blocked acknowledgement holds later result. |
@@ -50,6 +50,16 @@ model-routing authorization gate. Numbers below preserve that review's IDs.
 - Versioned policy, prompt parts, team skills, drafts, history and restoration;
   native inspection, status, pause, stop, retry and context views.
 
+## Repair review regressions
+
+Independent review of the repair added coverage for reportless retry assignments,
+live corrections during resumed turns, explicit pause/disable/service-stop/ticket-stop
+after handoff, retryable pre-send history reads, released model ownership, portable
+fixture paths and interrupted chunk writes. Only complete fsynced chunks become
+visible under their hash names; an in-process retry can recover after disk writes
+resume without deleting committed data. Model ownership is released after a run;
+only sessions with running native non-agent tasks remain parked for an operator.
+
 ## Repeatable checks
 
 From `vscode/`:
@@ -78,7 +88,7 @@ native-editor jobs.
 Local tests and green CI establish source behavior. An enterprise rollout must
 also retain evidence for the actual organization: Copilot entitlement/policy,
 Entra consent and conditional access, a real Teams one-to-one and channel
-roundtrip, GitHub Enterprise identity and permissions, restart/reconciliation in
+roundtrip, GitHub Enterprise identity and permissions, required CI and independent review branch protections, restart/reconciliation in
 the intended remote extension host, and expected storage/load/backup scale.
 Those checks need an authorized tenant and deployment; this PR does not claim
 that source validation supplies that qualification. Execution uses the operator's

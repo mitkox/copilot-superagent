@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -301,4 +303,31 @@ test('a damaged archive is rejected without replacing the committed manifest or 
     assert.equal(readFileSync(path, 'utf8'), manifest)
     assert.equal(readFileSync(join(f.directory, 'archive', name), 'utf8'), 'corrupt')
   } finally { f.clean() }
+})
+
+
+test('an interrupted archive write preserves committed state and retries after disk recovery', () => {
+  const f = fixture(), original = fs.writeFileSync
+  let reopened: TicketRuntime | undefined
+  try {
+    f.runtime.writeData('stable', 'previous commit')
+    const path = join(f.directory, 'state.json'), before = readFileSync(path, 'utf8')
+    const large = 'x'.repeat(9 * 1024 * 1024)
+    const storeLarge = (runtime: TicketRuntime) => runtime.repositories.mutateAutomation(data => { data.metadata.large = large })
+    fs.writeFileSync = ((...args: Parameters<typeof fs.writeFileSync>) => {
+      if (typeof args[0] === 'number' && Buffer.isBuffer(args[1]) && args[1].length >= 1024 * 1024) {
+        original(args[0], args[1].subarray(0, 17))
+        throw Object.assign(new Error('Fixture disk full'), { code: 'ENOSPC' })
+      }
+      return original(...args)
+    }) as typeof fs.writeFileSync
+    syncBuiltinESMExports()
+    try { assert.throws(() => storeLarge(f.runtime), /disk full/) }
+    finally { fs.writeFileSync = original; syncBuiltinESMExports() }
+    assert.equal(readFileSync(path, 'utf8'), before)
+    storeLarge(f.runtime)
+    f.runtime.dispose(); reopened = new TicketRuntime(f.directory)
+    assert.equal(reopened.readData('stable'), 'previous commit')
+    assert.equal(reopened.readData<string>('large')?.length, large.length)
+  } finally { fs.writeFileSync = original; syncBuiltinESMExports(); reopened?.dispose(); f.clean() }
 })

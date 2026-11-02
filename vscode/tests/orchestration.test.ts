@@ -511,3 +511,81 @@ test('router attachment cannot revive a ticket stopped by a person', async () =>
     assert.equal(f.runtime.get(ticket.id).ended?.by, 'human'); assert.equal(f.runs.length, 0)
   } finally { await f.clean() }
 })
+
+
+test('retrying a terminal report does not hand off its reportless replacement assignment', async () => {
+  let second!: () => void
+  const handoffs: number[] = []
+  const f = fixture(async request => {
+    if (f.runs.length === 1) await request.tools.find(tool => tool.name === 'orchestrator_report')!.invoke({ state: 'blocked', summary: 'Needs another attempt' })
+    else await new Promise<void>(resolve => { second = resolve; request.signal.addEventListener('abort', () => resolve(), { once: true }) })
+  })
+  f.backend.handoff = () => { handoffs.push(f.runs.length); second?.() }
+  try {
+    const ticket = f.runtime.create('Retry the same repair'); f.service.start()
+    await eventually(() => f.service.snapshot().health.workers === 0 && handoffs.length > 0)
+    f.runtime.retry(ticket.id); await eventually(() => f.runs.length === 2)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(handoffs.filter(run => run === 2).length, 0)
+    assert.equal(f.runtime.get(ticket.id).assignments.at(-1)?.report, undefined)
+  } finally { second?.(); await f.clean() }
+})
+
+test('corrections steer a held continuation after the original turn has settled', async () => {
+  let release!: () => void
+  const steered: string[] = []
+  const f = fixture(async request => {
+    if (f.runs.length === 1) await request.tools.find(tool => tool.name === 'orchestrator_report')!.invoke({ state: 'waiting', summary: 'Waiting for feedback' })
+    else await new Promise<void>(resolve => { release = resolve; request.signal.addEventListener('abort', () => resolve(), { once: true }) })
+  })
+  f.backend.steer = async input => { steered.push(input.prompt); input.onAccepted(); input.onConsumed() }
+  try {
+    const ticket = f.runtime.create('Continue this repair'); f.service.start()
+    await eventually(() => f.runs.length === 1 && f.service.snapshot().health.workers === 0)
+    f.runtime.followup(ticket.id, 'Resume and keep working'); await eventually(() => f.runs.length === 2)
+    f.runtime.followup(ticket.id, 'Leave the migration unchanged')
+    await eventually(() => steered.length === 1)
+    assert.match(steered[0]!, /Leave the migration unchanged/); assert.equal(f.runs.length, 2)
+  } finally { release?.(); await f.clean() }
+})
+
+for (const control of ['pause', 'disable', 'stopService', 'stopTicket'] as const) test(`explicit ${control} cancels a lease after its worker handed off`, async () => {
+  const parked = new Set<string>()
+  const f = fixture()
+  f.backend.handoff = id => { parked.add(id) }
+  f.backend.abort = async id => { parked.delete(id) }
+  try {
+    const ticket = f.runtime.create('Finish with retained background work'); f.service.start()
+    await eventually(() => !!f.runtime.get(ticket.id).ended && f.service.snapshot().health.workers === 0)
+    assert.ok(parked.has(ticket.id))
+    if (control === 'pause') f.runtime.setPaused(true)
+    else if (control === 'disable') f.service.saveSettings({ enabled: false }, f.service.settings.revision)
+    else if (control === 'stopService') await f.service.stop()
+    else await f.service.stopTicket(ticket.id)
+    await eventually(() => !parked.has(ticket.id))
+  } finally { await f.clean() }
+})
+
+
+for (const state of ['blocked', 'ready'] as const) test(`a continuation after ${state} ignores the terminal report from its previous turn`, async () => {
+  let release!: () => void
+  const handoffs: number[] = []
+  const f = fixture(async request => {
+    if (f.runs.length === 1) {
+      if (state === 'ready') f.runtime.bindPullRequest(request.ticketId, 7, true, 'github:scope')
+      await request.tools.find(tool => tool.name === 'orchestrator_report')!.invoke({ state, summary: 'Waiting for review', ...(state === 'blocked' ? { human_action: 'Which mode should be used?' } : {}) })
+    } else await new Promise<void>(resolve => { release = resolve; request.signal.addEventListener('abort', () => resolve(), { once: true }) })
+  })
+  f.backend.handoff = () => { handoffs.push(f.runs.length); if (f.runs.length === 2) release?.() }
+  try {
+    const ticket = f.runtime.create('Continue the approved task'); f.service.start()
+    await eventually(() => f.runs.length === 1 && f.service.snapshot().health.workers === 0)
+    const assignment = f.runtime.get(ticket.id).assignments.at(-1)!.id
+    f.runtime.followup(ticket.id, 'Use strict mode')
+    await eventually(() => f.runs.length === 2)
+    assert.equal(f.runtime.get(ticket.id).assignments.at(-1)!.id, assignment)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(handoffs.filter(run => run === 2).length, 0)
+    assert.equal(f.service.snapshot().health.workers, 1)
+  } finally { release?.(); await f.clean() }
+})

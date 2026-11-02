@@ -401,7 +401,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   register("stop", async () => {
     const h = await host(),
-      ticket = await choose(h.runtime, (ticket) => !ticket.ended);
+      ticket = await choose(h.runtime, () => true);
     if (
       ticket &&
       (await confirm(
@@ -409,7 +409,8 @@ export function activate(context: vscode.ExtensionContext): void {
         "Stops future Superagent work. Also press Stop in Copilot Chat to cancel any native tools already running. Worktrees are retained for review.",
       ))
     )
-      h.runtime.stop(ticket.id);
+      if (automation?.active) await automation.stopTicket(ticket.id);
+      else h.runtime.stop(ticket.id);
   });
   register("retry", async () => {
     const h = await host(),

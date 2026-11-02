@@ -26,7 +26,7 @@ function matches(value) { return json(value).toLowerCase().includes(document.get
 function detail(parent, label, value) { const d = node('details', undefined, parent); node('summary', label, d); node('pre', json(value), d); }
 function ticketCard(ticket, parent) { const card = node('article', undefined, parent); node('h2', ticket.title, card); const report = ticket.assignments?.at(-1)?.report; node('div', (ticket.ended?.outcome || report?.state || 'queued') + ' · ' + ticket.id, card, 'badge'); if (ticket.attention)
     node('p', ticket.attention.question, card); if (report)
-    node('p', report.summary, card); const actions = node('div', undefined, card, 'toolbar'); button(actions, 'Open worktree', 'openTicket', ticket.id); button(actions, 'Follow-up', 'followup', ticket.id); if (!ticket.ended) {
+    node('p', report.summary, card); const actions = node('div', undefined, card, 'toolbar'); button(actions, 'Open worktree', 'openTicket', ticket.id); button(actions, 'Follow-up', 'followup', ticket.id); if (ticket.ended) button(actions, 'Stop background jobs', 'stopTicket', ticket.id); if (!ticket.ended) {
     button(actions, 'Request status', 'requestStatus', ticket.id); button(actions, 'Stop', 'stopTicket', ticket.id);
     if (['blocked', 'failed'].includes(report?.state))
         button(actions, 'Retry', 'retry', ticket.id);

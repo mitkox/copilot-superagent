@@ -355,3 +355,33 @@ test('hanging SDK shutdown falls back to bounded forceStop', { timeout: 2000 }, 
   try { await f.backend.dispose(); assert.equal(forced, 1) }
   finally { clearTimeout(keepAlive) }
 })
+
+
+test('a transient steering history read can retry the same durable input without replaying a send', async t => {
+  const f = fixture(t)
+  let release!: () => void, reads = 0, sends = 0, accepted = 0
+  f.client.send = async (_config, session) => {
+    Object.assign(session, { getEvents: async () => { if (++reads === 1) throw new Error('Temporary history failure'); return [] }, send: async () => { sends++; return 'input-message' } })
+    await new Promise<void>(resolve => { release = resolve })
+  }
+  const running = f.backend.run(f.input)
+  while (!release) await new Promise(resolve => setTimeout(resolve, 1))
+  const input = { ticketId: f.input.ticketId, requestId: 'same-durable-input', prompt: 'A correction', signal: f.input.signal, onAccepted() { accepted++ }, onConsumed() {} }
+  try {
+    await assert.rejects(f.backend.steer(input), /Temporary history failure/)
+    await f.backend.steer(input); await f.backend.steer(input)
+    assert.equal(reads, 2); assert.equal(sends, 1); assert.equal(accepted, 1)
+  } finally { release(); await running }
+})
+
+test('completed and failed workers release model ownership and reject late inference', async t => {
+  const f = fixture(t)
+  for (let i = 0; i < 4; i++) await f.backend.run({ ...f.input, ticketId: 'ticket-' + i, sessionId: 'session-' + i })
+  f.client.send = async () => { throw new Error('Failed turn') }
+  await assert.rejects(f.backend.run({ ...f.input, ticketId: 'failed-ticket', sessionId: 'failed-session' }))
+  const handler = f.clientOptions().requestHandler as unknown as { rewrite(body: unknown, context: unknown): void }
+  assert.throws(() => handler.rewrite({}, { sessionId: 'session-1', signal: f.input.signal }), /Unknown model session/)
+  assert.equal((f.backend as unknown as { modelOwners: Map<string, unknown> }).modelOwners.size, 0)
+  await f.backend.dispose()
+  assert.equal((f.backend as unknown as { modelOwners: Map<string, unknown> }).modelOwners.size, 0)
+})

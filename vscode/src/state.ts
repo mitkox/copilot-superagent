@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { hostname } from 'node:os'
 import type { Candidate, Decision, OutboundMessage, Repositories, Thread, Ticket, Trigger, TriggerDisposition } from '../../src/core/index.ts'
@@ -163,7 +163,6 @@ export class DurableRepositories implements Repositories {
   private readonly lockPath: string
   private readonly statePath: string
   private readonly lockToken = randomUUID()
-  private chunks: string[] = []
   private readonly listeners = new Set<() => void>()
 
   constructor(private readonly directory: string) {
@@ -186,8 +185,8 @@ export class DurableRepositories implements Repositories {
           if (!Array.isArray(envelope.chunks) || !envelope.chunks.length || envelope.chunks.length > 4096 || !envelope.chunks.every(name => typeof name === 'string' && /^[a-f0-9]{64}$/.test(name))) throw new Error('Invalid state archive manifest')
           const archive = lstatSync(join(this.directory, 'archive'))
           if (!archive.isDirectory() || archive.isSymbolicLink() || process.platform !== 'win32' && (archive.mode & 0o077) !== 0) throw new Error('Unsafe state archive directory')
-          this.chunks = envelope.chunks as string[]
-          const body = Buffer.concat(this.chunks.map(name => {
+          const chunks = envelope.chunks as string[]
+          const body = Buffer.concat(chunks.map(name => {
             const path = join(this.directory, 'archive', name), info = lstatSync(path)
             if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024 || process.platform !== 'win32' && (info.mode & 0o077) !== 0) throw new Error('Unsafe state archive')
             const bytes = readFileSync(path)
@@ -248,7 +247,6 @@ export class DurableRepositories implements Repositories {
   }
 
   private persist(): void {
-    // Transcripts are replaceable telemetry. Authoritative domain/dedup/delivery history is never pruned.
     let remaining = 2 * 1024 * 1024
     for (const session of [...this.data.extension?.sessions ?? []].reverse()) {
       let budget = Math.min(256 * 1024, remaining), size = 2
@@ -271,14 +269,20 @@ export class DurableRepositories implements Repositories {
       if (!info.isDirectory() || info.isSymbolicLink() || process.platform !== 'win32' && (info.mode & 0o077) !== 0) throw new Error('Unsafe state archive directory')
       for (let offset = 0; offset < payload.length; offset += 1024 * 1024) {
         const bytes = payload.subarray(offset, offset + 1024 * 1024), name = createHash('sha256').update(bytes).digest('hex')
-        const path = join(directory, name)
+        const path = join(directory, name), temporary = join(directory, `.chunk-${randomUUID()}.tmp`)
         let file: number | undefined
-        try { file = openSync(path, 'wx', 0o600); writeFileSync(file, bytes); fsyncSync(file) }
-        catch (error) {
+        try {
+          file = openSync(temporary, 'wx', 0o600)
+          writeFileSync(file, bytes); fsyncSync(file); closeSync(file); file = undefined
+          linkSync(temporary, path)
+        } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
           const stat = lstatSync(path)
-          if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== bytes.length || createHash('sha256').update(readFileSync(path)).digest('hex') !== name) throw new Error('Corrupt existing state archive')
-        } finally { if (file !== undefined) closeSync(file) }
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== bytes.length || process.platform !== 'win32' && (stat.mode & 0o077) !== 0 || createHash('sha256').update(readFileSync(path)).digest('hex') !== name) throw new Error('Corrupt existing state archive')
+        } finally {
+          if (file !== undefined) closeSync(file)
+          try { unlinkSync(temporary) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        }
         chunks.push(name)
       }
       if (process.platform !== 'win32') { const fd = openSync(directory, constants.O_RDONLY); try { fsyncSync(fd) } finally { closeSync(fd) } }
@@ -308,11 +312,10 @@ export class DurableRepositories implements Repositories {
       if (directoryFile !== undefined) closeSync(directoryFile)
       try { unlinkSync(temporary) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     }
-    this.chunks = chunks
     try {
       const keep = new Set(chunks)
-      for (const name of readdirSync(join(this.directory, 'archive'))) if (/^[a-f0-9]{64}$/.test(name) && !keep.has(name)) unlinkSync(join(this.directory, 'archive', name))
-    } catch { /* Cleanup cannot roll back a durable manifest; retry on the next commit. */ }
+      for (const name of readdirSync(join(this.directory, 'archive'))) if (/^(?:[a-f0-9]{64}|\.chunk-[a-f0-9-]+\.tmp)$/.test(name) && !keep.has(name)) unlinkSync(join(this.directory, 'archive', name))
+    } catch {}
   }
 
   dispose(): void {

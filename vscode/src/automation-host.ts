@@ -25,7 +25,7 @@ export interface AutomationHooks {
   github(): Promise<GitHubSourceConfig>
   changed(): void
 }
-export interface AutomationLifecycle extends vscode.Disposable { shutdown(): Promise<void>; readonly active: boolean }
+export interface AutomationLifecycle extends vscode.Disposable { shutdown(): Promise<void>; readonly active: boolean; stopTicket(ticketId: string): Promise<void> }
 const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 
@@ -326,7 +326,7 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
         assertCurrent(); if (text?.trim()) { h.runtime.followup(id, text); s.kick() } break
       }
       case 'requestStatus': h.runtime.engine.requestStatus(id); s.kick(); break
-      case 'stopTicket': h.runtime.stop(id); s.kick(); break
+      case 'stopTicket': await s.stopTicket(id); break
       case 'retry': h.runtime.retry(id); s.kick(); break
       case 'retryEffect': s.retryEffect(id); break
       case 'unsubscribe': h.runtime.engine.unsubscribe(id); s.kick(); break
@@ -399,6 +399,7 @@ export function activateAutomation(context: vscode.ExtensionContext, hooks: Auto
   if (config().get('service.enabled', false)) void get().then(s => { if (s.settings.value.enabled) s.start() }).catch(() => {})
   const disposable: AutomationLifecycle = {
     get active() { return !!service },
+    async stopTicket(ticketId) { assertCurrent(); if (service) await service.stopTicket(ticketId); else (await hooks.host()).runtime.stop(ticketId) },
     shutdown() {
       closing = true; panel.dispose()
       return shutdownPromise ??= (async () => {

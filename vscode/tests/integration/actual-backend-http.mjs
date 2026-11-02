@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { pathToFileURL as fixtureURL } from 'node:url';
 const { CopilotBackend } = await import(fixtureURL(process.env.SUPERAGENT_TEST_BACKEND).href);
 const fixtureDirectory = dirname(fileURLToPath(import.meta.url));
-const sdkDirectory = resolve(process.argv[2] ?? '/tmp/copilot-superagent-enterprise-20261102/vscode/node_modules/@github/copilot-sdk');
+const sdkDirectory = resolve(process.env.SUPERAGENT_TEST_SDK);
 const cliPath = resolve(process.env.SUPERAGENT_TEST_COPILOT);
 const { version } = JSON.parse(await readFile(join(sdkDirectory, 'package.json'), 'utf8'));
 assert.equal(version, '1.0.28', 'Fixture qualification is pinned to SDK 1.0.28');
